@@ -1,6 +1,6 @@
 {
   "name": "@developersailor/express-auth",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Secure, flexible authentication package for Express.js with JWT, refresh tokens, and role-based access control",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
