@@ -5,7 +5,7 @@ import {
   Tags,
   Summary,
   Description,
-  Response as ApiResponse,
+  ApiResponse,
   Security,
   createRouterFromControllers,
   Middleware,
