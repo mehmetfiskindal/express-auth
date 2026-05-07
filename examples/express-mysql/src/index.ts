@@ -2,10 +2,11 @@ import 'reflect-metadata';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-import mongoose from 'mongoose';
+import { DataSource } from 'typeorm';
 import { createAuthRouter, createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';
 import { createRouterFromControllers } from '@developersailor/express-openapi-decorators';
-import { MongoUserRepository, MongoRefreshTokenRepository } from './repositories';
+import { User, RefreshToken } from './entities';
+import { MySQLUserRepository, MySQLRefreshTokenRepository } from './repositories';
 import { AuthController, ProfileController } from './controllers';
 import swaggerUi from 'swagger-ui-express';
 import { openApiConfig } from './openapi.config';
@@ -14,7 +15,7 @@ import { openApiConfig } from './openapi.config';
 dotenv.config();
 
 // Validate required environment variables
-const requiredEnvVars = ['JWT_SECRET', 'REFRESH_TOKEN_SECRET', 'MONGODB_URI'];
+const requiredEnvVars = ['JWT_SECRET', 'REFRESH_TOKEN_SECRET', 'DB_HOST', 'DB_PORT', 'DB_USERNAME', 'DB_PASSWORD', 'DB_NAME'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
     console.error(`Error: ${envVar} environment variable is required`);
@@ -22,26 +23,39 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
+// Initialize TypeORM DataSource
+const dataSource = new DataSource({
+  type: 'mysql',
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT!),
+  username: process.env.DB_USERNAME,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  entities: [User, RefreshToken],
+  synchronize: process.env.NODE_ENV !== 'production',
+  logging: process.env.NODE_ENV === 'development',
+});
+
 const app = express();
 
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// Connect to MongoDB
+// Connect to MySQL
 async function connectDatabase() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI!);
-    console.log('✅ Connected to MongoDB');
+    await dataSource.initialize();
+    console.log('✅ Connected to MySQL database');
   } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
+    console.error('❌ MySQL connection error:', error);
     process.exit(1);
   }
 }
 
 // Initialize repositories
-const userRepository = new MongoUserRepository();
-const refreshTokenRepository = new MongoRefreshTokenRepository();
+const userRepository = new MySQLUserRepository(dataSource.getRepository(User));
+const refreshTokenRepository = new MySQLRefreshTokenRepository(dataSource.getRepository(RefreshToken));
 
 // Initialize auth router
 const authConfig = {
@@ -88,7 +102,7 @@ app.use('/api', apiRouter);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiConfig, {
   explorer: true,
   customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'Express Auth API Documentation - MongoDB',
+  customSiteTitle: 'Express Auth API Documentation - MySQL',
 }));
 
 // OpenAPI JSON endpoint
@@ -99,12 +113,11 @@ app.get('/api-docs.json', (req, res) => {
 
 // Health check
 app.get('/health', async (req, res) => {
-  const dbState = mongoose.connection.readyState;
-  const dbStatus = dbState === 1 ? 'connected' : 'disconnected';
+  const isConnected = dataSource.isInitialized;
   
   res.json({ 
     status: 'ok', 
-    database: dbStatus,
+    database: isConnected ? 'connected' : 'disconnected',
     timestamp: new Date().toISOString() 
   });
 });
@@ -151,6 +164,8 @@ startServer();
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
-  await mongoose.connection.close();
+  if (dataSource.isInitialized) {
+    await dataSource.destroy();
+  }
   process.exit(0);
 });

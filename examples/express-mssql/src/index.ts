@@ -2,10 +2,11 @@ import 'reflect-metadata';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-import mongoose from 'mongoose';
+import { Sequelize } from 'sequelize';
 import { createAuthRouter, createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';
 import { createRouterFromControllers } from '@developersailor/express-openapi-decorators';
-import { MongoUserRepository, MongoRefreshTokenRepository } from './repositories';
+import { User, RefreshToken } from './models';
+import { MSSQLUserRepository, MSSQLRefreshTokenRepository } from './repositories';
 import { AuthController, ProfileController } from './controllers';
 import swaggerUi from 'swagger-ui-express';
 import { openApiConfig } from './openapi.config';
@@ -14,7 +15,7 @@ import { openApiConfig } from './openapi.config';
 dotenv.config();
 
 // Validate required environment variables
-const requiredEnvVars = ['JWT_SECRET', 'REFRESH_TOKEN_SECRET', 'MONGODB_URI'];
+const requiredEnvVars = ['JWT_SECRET', 'REFRESH_TOKEN_SECRET', 'DB_HOST', 'DB_PORT', 'DB_USERNAME', 'DB_PASSWORD', 'DB_NAME'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
     console.error(`Error: ${envVar} environment variable is required`);
@@ -22,26 +23,41 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
+// Initialize Sequelize
+const sequelize = new Sequelize({
+  dialect: 'mssql',
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT!),
+  username: process.env.DB_USERNAME,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  logging: process.env.NODE_ENV === 'development' ? console.log : false,
+});
+
 const app = express();
 
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// Connect to MongoDB
+// Connect to MSSQL
 async function connectDatabase() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI!);
-    console.log('✅ Connected to MongoDB');
+    await sequelize.authenticate();
+    console.log('✅ Connected to MSSQL database');
+    
+    // Sync models
+    await sequelize.sync({ alter: process.env.NODE_ENV !== 'production' });
+    console.log('✅ Database models synchronized');
   } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
+    console.error('❌ MSSQL connection error:', error);
     process.exit(1);
   }
 }
 
 // Initialize repositories
-const userRepository = new MongoUserRepository();
-const refreshTokenRepository = new MongoRefreshTokenRepository();
+const userRepository = new MSSQLUserRepository(User);
+const refreshTokenRepository = new MSSQLRefreshTokenRepository(RefreshToken);
 
 // Initialize auth router
 const authConfig = {
@@ -88,7 +104,7 @@ app.use('/api', apiRouter);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiConfig, {
   explorer: true,
   customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'Express Auth API Documentation - MongoDB',
+  customSiteTitle: 'Express Auth API Documentation - MSSQL',
 }));
 
 // OpenAPI JSON endpoint
@@ -99,14 +115,20 @@ app.get('/api-docs.json', (req, res) => {
 
 // Health check
 app.get('/health', async (req, res) => {
-  const dbState = mongoose.connection.readyState;
-  const dbStatus = dbState === 1 ? 'connected' : 'disconnected';
-  
-  res.json({ 
-    status: 'ok', 
-    database: dbStatus,
-    timestamp: new Date().toISOString() 
-  });
+  try {
+    await sequelize.authenticate();
+    res.json({ 
+      status: 'ok', 
+      database: 'connected',
+      timestamp: new Date().toISOString() 
+    });
+  } catch {
+    res.json({ 
+      status: 'ok', 
+      database: 'disconnected',
+      timestamp: new Date().toISOString() 
+    });
+  }
 });
 
 // Error handler
@@ -151,6 +173,6 @@ startServer();
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
-  await mongoose.connection.close();
+  await sequelize.close();
   process.exit(0);
 });

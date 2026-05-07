@@ -7,7 +7,6 @@ import {
   Description,
   Response as ApiResponse,
   Security,
-  createRouterFromControllers,
   Middleware,
 } from '@developersailor/express-openapi-decorators';
 import { createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';

@@ -4,8 +4,9 @@ import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createAuthRouter, createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';
+import { createRouterFromControllers } from '@developersailor/express-openapi-decorators';
 import { PrismaUserRepository, PrismaRefreshTokenRepository } from './repositories';
-import { ProfileController } from './controllers';
+import { AuthController, ProfileController } from './controllers';
 import swaggerUi from 'swagger-ui-express';
 import { openApiConfig } from './openapi.config';
 
@@ -33,7 +34,7 @@ const userRepository = new PrismaUserRepository(prisma);
 const refreshTokenRepository = new PrismaRefreshTokenRepository(prisma);
 
 // Initialize auth router
-const authRouter = createAuthRouter({
+const authConfig = {
   jwtSecret: process.env.JWT_SECRET!,
   refreshTokenSecret: process.env.REFRESH_TOKEN_SECRET!,
   accessTokenExpiresIn: '15m',
@@ -45,7 +46,7 @@ const authRouter = createAuthRouter({
   cookie: {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: 'strict' as const,
   },
   passwordRules: {
     minLength: 8,
@@ -54,10 +55,7 @@ const authRouter = createAuthRouter({
     requireNumbers: true,
     requireSpecialChars: true,
   },
-});
-
-// Mount auth routes
-app.use('/auth', authRouter);
+};
 
 // Initialize JWT service for middleware
 const jwtService = new JWTService({
@@ -66,12 +64,15 @@ const jwtService = new JWTService({
 });
 
 // Initialize controllers
+const authController = new AuthController(authConfig);
 const profileController = new ProfileController(jwtService);
 
-// Profile routes
-app.get('/api/profile', ...profileController.getProfileHandler());
-app.get('/api/admin', ...profileController.getAdminHandler());
-app.get('/api/public', ...profileController.getPublicHandler());
+// Mount auth routes using decorators
+app.use('/auth', authController.getRouter());
+
+// Mount API routes using decorators router
+const apiRouter = createRouterFromControllers([profileController]);
+app.use('/api', apiRouter);
 
 // Swagger/OpenAPI Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiConfig, {
