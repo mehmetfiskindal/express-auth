@@ -1,5 +1,10 @@
 import { Request } from 'express';
 import { AuthRepositories, AuthUser } from './repository';
+import { RateLimitConfig } from '../services/rate-limit-service';
+import { SecurityMonitorConfig } from '../services/security-monitor';
+import { CORSConfig } from '../services/cors-service';
+import { HTTPSConfig } from '../services/https-service';
+import { CleanupConfig } from '../services/token-cleanup-job';
 
 /**
  * Permission format - hem flat hem hierarchical destekler
@@ -129,6 +134,40 @@ export interface AuthConfig {
     tokenExpired?: string;
     invalidToken?: string;
   };
+
+  /**
+   * Rate limiting yapılandırması
+   */
+  rateLimit?: {
+    /** Enable rate limiting (default: true) */
+    enabled?: boolean;
+    /** General API rate limit config */
+    general?: Partial<RateLimitConfig>;
+    /** Auth endpoints (login/register) rate limit config - stricter */
+    auth?: Partial<RateLimitConfig>;
+    /** Strict rate limit for sensitive operations */
+    strict?: Partial<RateLimitConfig>;
+  };
+
+  /**
+   * CORS yapılandırması
+   */
+  cors?: Partial<CORSConfig>;
+
+  /**
+   * HTTPS enforcement yapılandırması
+   */
+  https?: Partial<HTTPSConfig>;
+
+  /**
+   * Security monitoring yapılandırması
+   */
+  securityMonitor?: Partial<SecurityMonitorConfig>;
+
+  /**
+   * Token cleanup job yapılandırması
+   */
+  tokenCleanup?: Partial<CleanupConfig>;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { JWTService, PasswordService } from '../services';
+import { JWTService, PasswordService, SecurityMonitor, TokenCleanupJob } from '../services';
 import { AuthConfig, LoginResult, RefreshResult, AuthenticatedRequest } from '../types';
 import { createAuthMiddleware } from '../middleware';
 
@@ -29,6 +29,29 @@ export function createAuthRouter(config: AuthConfig): Router {
     invalidCredentials: config.errorMessages?.invalidCredentials || 'Invalid email or password',
     unauthorized: config.errorMessages?.unauthorized || 'Unauthorized',
     invalidToken: config.errorMessages?.invalidToken || 'Invalid token',
+  };
+
+  // Initialize security monitor
+  const securityMonitor = new SecurityMonitor(config.securityMonitor);
+
+  // Initialize token cleanup job
+  let tokenCleanupJob: TokenCleanupJob | null = null;
+  if (config.tokenCleanup?.enabled !== false) {
+    tokenCleanupJob = new TokenCleanupJob(refreshTokenRepository, config.tokenCleanup);
+    tokenCleanupJob.start();
+  }
+
+  // Helper to get IP address
+  const getClientIP = (req: Request): string => {
+    return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+      || req.ip
+      || req.connection?.remoteAddress
+      || 'unknown';
+  };
+
+  // Helper to get user agent
+  const getUserAgent = (req: Request): string | undefined => {
+    return req.headers['user-agent'];
   };
 
   /**
@@ -96,7 +119,21 @@ export function createAuthRouter(config: AuthConfig): Router {
    * POST /auth/login
    */
   router.post('/login', async (req: Request, res: Response): Promise<void> => {
+    const ip = getClientIP(req);
+    const userAgent = getUserAgent(req);
+
     try {
+      // Check if IP is blocked
+      if (securityMonitor.isBlocked(ip)) {
+        const blockedUntil = securityMonitor.getBlockedIPs().find(b => b.ip === ip)?.blockedUntil;
+        res.status(403).json({
+          error: 'Access denied',
+          message: 'Too many failed login attempts. Please try again later.',
+          blockedUntil,
+        });
+        return;
+      }
+
       const { email, password } = req.body;
 
       // Validasyon
@@ -111,12 +148,16 @@ export function createAuthRouter(config: AuthConfig): Router {
       // Kullanıcı yoksa veya şifre yanlışsa aynı hatayı dön
       // Güvenlik: hangisinin yanlış olduğunu belli etmeyelim
       if (!user) {
+        // Record failed attempt
+        securityMonitor.recordFailedAttempt(ip, email, userAgent);
         res.status(401).json({ error: errorMessages.invalidCredentials });
         return;
       }
 
       // Hesap aktif mi?
       if (user.isActive === false) {
+        // Record failed attempt
+        securityMonitor.recordFailedAttempt(ip, email, userAgent);
         res.status(401).json({ error: errorMessages.invalidCredentials });
         return;
       }
@@ -124,9 +165,14 @@ export function createAuthRouter(config: AuthConfig): Router {
       // Şifreyi doğrula
       const isPasswordValid = await passwordService.verifyPassword(password, user.passwordHash);
       if (!isPasswordValid) {
+        // Record failed attempt
+        securityMonitor.recordFailedAttempt(ip, email, userAgent);
         res.status(401).json({ error: errorMessages.invalidCredentials });
         return;
       }
+
+      // Record successful login
+      securityMonitor.recordSuccessfulLogin(user.id, ip, userAgent);
 
       // Token üret - roller ve permission'lar JWT'ye eklenir
       const tokens = jwtService.generateTokenPair({
@@ -267,13 +313,25 @@ export function createAuthRouter(config: AuthConfig): Router {
   /**
    * POST /auth/logout
    */
-  router.post('/logout', async (req: Request, res: Response): Promise<void> => {
+  router.post('/logout', createAuthMiddleware(jwtService, {
+    errorMessages: config.errorMessages,
+    userRepository: loadUserOnRequest ? userRepository : undefined,
+    authorization: config.authorization,
+  }), async (req: Request, res: Response): Promise<void> => {
+    const user = (req as AuthenticatedRequest).user;
+    const ip = getClientIP(req);
+
     try {
       const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
 
       if (refreshToken) {
         // Token'ı revoke et
         await refreshTokenRepository.revokeToken(refreshToken);
+      }
+
+      // Record logout
+      if (user) {
+        securityMonitor.recordLogout(user.sub, ip);
       }
 
       // Cookie'yi temizle
@@ -366,6 +424,44 @@ export function createAuthRouter(config: AuthConfig): Router {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
+
+  /**
+   * GET /auth/security/stats (Admin only)
+   * Security monitoring statistics
+   */
+  router.get('/security/stats', createAuthMiddleware(jwtService, {
+    errorMessages: config.errorMessages,
+    userRepository: loadUserOnRequest ? userRepository : undefined,
+    authorization: config.authorization,
+  }), async (req: Request, res: Response): Promise<void> => {
+    try {
+      const user = (req as AuthenticatedRequest).user;
+
+      if (!user || !user.roles?.includes('admin')) {
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+
+      const stats = securityMonitor.getStats();
+      const blockedIPs = securityMonitor.getBlockedIPs();
+      const cleanupStats = tokenCleanupJob?.getStats();
+
+      res.json({
+        security: {
+          ...stats,
+          blockedIPs,
+        },
+        tokenCleanup: cleanupStats,
+      });
+    } catch (error) {
+      console.error('Security stats error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // Attach security monitor and cleanup job to router for external access
+  (router as any).securityMonitor = securityMonitor;
+  (router as any).tokenCleanupJob = tokenCleanupJob;
 
   return router;
 }

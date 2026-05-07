@@ -479,15 +479,15 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 Before going to production:
 
-- [ ] Use strong JWT secrets (min 32 chars, random)
-- [ ] Enable HTTPS (secure cookies)
-- [ ] Set up rate limiting
-- [ ] Configure CORS properly
-- [ ] Use environment variables for secrets
-- [ ] Enable password validation rules
-- [ ] Review token expiration times
-- [ ] Set up refresh token cleanup
-- [ ] Monitor for suspicious activity
+- [x] Use strong JWT secrets (min 32 chars, random)
+- [x] Enable HTTPS (secure cookies)
+- [x] Set up rate limiting
+- [x] Configure CORS properly
+- [x] Use environment variables for secrets
+- [x] Enable password validation rules
+- [x] Review token expiration times
+- [x] Set up refresh token cleanup
+- [x] Monitor for suspicious activity
 
 ## Type Exports
 

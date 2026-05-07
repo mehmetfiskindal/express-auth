@@ -3,7 +3,13 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
-import { createAuthRouter, createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';
+import {
+  createAuthRouter,
+  createAuthMiddleware,
+  requireRoles,
+  JWTService,
+  createSecurityMiddleware,
+} from '@developersailor/express-auth';
 import { ExpressAdapter } from '@developersailor/express-openapi-decorators';
 import { PrismaUserRepository, PrismaRefreshTokenRepository } from './repositories';
 import { AuthController, ProfileController } from './controllers';
@@ -25,15 +31,11 @@ for (const envVar of requiredEnvVars) {
 const app = express();
 const prisma = new PrismaClient();
 
-// Middleware
-app.use(express.json());
-app.use(cookieParser());
-
 // Initialize repositories
 const userRepository = new PrismaUserRepository(prisma);
 const refreshTokenRepository = new PrismaRefreshTokenRepository(prisma);
 
-// Initialize auth router
+// Initialize auth router with comprehensive security configuration
 const authConfig = {
   jwtSecret: process.env.JWT_SECRET!,
   refreshTokenSecret: process.env.REFRESH_TOKEN_SECRET!,
@@ -55,7 +57,60 @@ const authConfig = {
     requireNumbers: true,
     requireSpecialChars: true,
   },
+  // Rate limiting configuration
+  rateLimit: {
+    enabled: true,
+    general: {
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      maxRequests: 100,
+    },
+    auth: {
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      maxRequests: 5, // Stricter for auth endpoints
+    },
+    strict: {
+      windowMs: 60 * 60 * 1000, // 1 hour
+      maxRequests: 10, // Very strict
+    },
+  },
+  // CORS configuration
+  cors: {
+    origin: process.env.NODE_ENV === 'production'
+      ? (process.env.ALLOWED_ORIGINS?.split(',') || ['https://yourdomain.com'])
+      : ['http://localhost:3000', 'http://localhost:3001'],
+    credentials: true,
+  },
+  // HTTPS enforcement (only in production)
+  https: {
+    enabled: process.env.NODE_ENV === 'production',
+  },
+  // Security monitoring
+  securityMonitor: {
+    enabled: true,
+    maxFailedAttempts: 5,
+    failedAttemptsWindow: 15 * 60 * 1000, // 15 minutes
+    blockDuration: 30 * 60 * 1000, // 30 minutes
+    trackConcurrentLogins: true,
+    maxConcurrentSessions: 5,
+  },
+  // Token cleanup job
+  tokenCleanup: {
+    enabled: true,
+    interval: 60 * 60 * 1000, // 1 hour
+    deleteAfterExpired: 24 * 60 * 60 * 1000, // 24 hours
+    cleanupRevoked: true,
+  },
 };
+
+// Create security middleware bundle
+const security = createSecurityMiddleware(authConfig);
+
+// Apply security middleware before body parsing
+security.apply(app);
+
+// Body parsing middleware
+app.use(express.json());
+app.use(cookieParser());
 
 // Initialize JWT service for middleware
 const jwtService = new JWTService({
@@ -100,7 +155,11 @@ app.get('/api-docs.json', (req, res) => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    security: security.getStats(),
+  });
 });
 
 // Error handler
@@ -114,6 +173,16 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log('');
+  console.log('🛡️  Security Features Enabled:');
+  console.log('  ✅ Rate Limiting: General (100/15min), Auth (5/15min)');
+  console.log('  ✅ CORS: Configured for development/production');
+  console.log('  ✅ Security Monitoring: Brute-force detection enabled');
+  console.log('  ✅ Token Cleanup: Running every hour');
+  console.log('  ✅ Security Headers: X-Frame-Options, CSP, HSTS');
+  if (process.env.NODE_ENV === 'production') {
+    console.log('  ✅ HTTPS Enforcement: Enabled');
+  }
+  console.log('');
   console.log('📚 API Documentation:');
   console.log(`  Swagger UI: http://localhost:${PORT}/api-docs`);
   console.log(`  OpenAPI JSON: http://localhost:${PORT}/api-docs.json`);
@@ -125,6 +194,7 @@ app.listen(PORT, () => {
   console.log('  POST /auth/logout      - Logout');
   console.log('  POST /auth/logout-all  - Logout from all devices');
   console.log('  GET  /auth/me          - Get current user');
+  console.log('  GET  /auth/security/stats - Security statistics (admin)');
   console.log('');
   console.log('👤 Profile Endpoints:');
   console.log('  GET /api/public        - Public endpoint');
@@ -132,12 +202,20 @@ app.listen(PORT, () => {
   console.log('  GET /api/admin         - Admin only endpoint');
   console.log('');
   console.log('❤️  Health Check:');
-  console.log('  GET /health            - Health check');
+  console.log('  GET /health            - Health check with security stats');
 });
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
+  security.cleanup();
+  await prisma.$disconnect();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, shutting down gracefully');
+  security.cleanup();
   await prisma.$disconnect();
   process.exit(0);
 });
