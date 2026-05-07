@@ -1,0 +1,45 @@
+# NPM Publish Configuration
+
+# Source files (don't publish)
+src/
+tsconfig.json
+.eslintrc.js
+.eslintrc.json
+jest.config.js
+*.test.ts
+*.spec.ts
+
+# Development files
+.vscode/
+.idea/
+.github/
+examples/
+tests/
+coverage/
+.nyc_output/
+
+# Environment and config files
+.env*
+!.env.example
+
+# Build tools
+webpack.config.js
+rollup.config.js
+vite.config.ts
+
+# Documentation source
+docs/
+*.md
+!README.md
+!LICENSE
+
+# CI/CD
+.github/
+.travis.yml
+.gitlab-ci.yml
+azure-pipelines.yml
+
+# Misc
+.DS_Store
+*.log
+node_modules/

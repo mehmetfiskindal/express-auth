@@ -1,0 +1,28 @@
+{
+  "name": "express-mysql-auth-example",
+  "version": "1.0.0",
+  "description": "Express + MySQL/TypeORM auth example using @developersailor/express-auth",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "db:sync": "tsx src/sync-database.ts",
+    "db:seed": "tsx src/seed.ts"
+  },
+  "dependencies": {
+    "@developersailor/express-auth": "file:../..",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "mysql2": "^3.6.0",
+    "reflect-metadata": "^0.2.0",
+    "typeorm": "^0.3.17"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.6",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
