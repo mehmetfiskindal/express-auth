@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import { DataSource } from 'typeorm';
 import { createAuthRouter, createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';
-import { createRouterFromControllers } from '@developersailor/express-openapi-decorators';
+import { ExpressAdapter } from '@developersailor/express-openapi-decorators';
 import { User, RefreshToken } from './entities';
 import { MySQLUserRepository, MySQLRefreshTokenRepository } from './repositories';
 import { AuthController, ProfileController } from './controllers';
@@ -89,14 +89,25 @@ const jwtService = new JWTService({
 
 // Initialize controllers
 const authController = new AuthController(authConfig);
-const profileController = new ProfileController(jwtService);
 
 // Mount auth routes
 app.use('/auth', authController.getRouter());
 
-// Mount API routes using decorators router
-const apiRouter = createRouterFromControllers([profileController]);
-app.use('/api', apiRouter);
+// Mount API routes using decorators router with ExpressAdapter
+// Use ExpressAdapter to provide custom controller factory
+const adapter = new ExpressAdapter(app, {
+  controllerFactory: (controllerClass) => {
+    if (controllerClass === ProfileController) {
+      return new ProfileController(jwtService);
+    }
+    return new (controllerClass as any)();
+  },
+  namedMiddlewares: {
+    auth: createAuthMiddleware(jwtService),
+    'roles:admin': requireRoles(['admin']),
+  },
+});
+adapter.registerControllers([ProfileController]);
 
 // Swagger/OpenAPI Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiConfig, {
