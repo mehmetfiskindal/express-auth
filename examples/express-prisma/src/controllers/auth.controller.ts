@@ -3,13 +3,12 @@ import {
   Controller,
   Post,
   Get,
-  Route,
-  Body,
   Tags,
   Summary,
   Description,
-  Response as ApiResponse,
   Security,
+  SchemaObject,
+  ReferenceObject,
 } from '@developersailor/express-openapi-decorators';
 import { createAuthRouter, AuthConfig } from '@developersailor/express-auth';
 import { RegisterRequest, LoginRequest, RefreshTokenRequest, LoginResponse, TokenResponse, UserResponse, MessageResponse } from '../dto';
@@ -39,7 +38,7 @@ export class AuthController {
  * Auth Request Schemas for OpenAPI documentation
  * These are used for Swagger UI documentation
  */
-export const AuthSchemas = {
+export const AuthSchemas: Record<string, SchemaObject | ReferenceObject> = {
   RegisterRequest: {
     type: 'object',
     required: ['email', 'password'],

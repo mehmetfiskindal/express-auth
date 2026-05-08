@@ -122,7 +122,7 @@ const jwtService = new JWTService({
 const authController = new AuthController(authConfig);
 
 // Mount auth routes using decorators
-app.use('/auth', authController.getRouter());
+app.use('/auth', authController.getRouter() as any);
 
 // Mount API routes using decorators router with ExpressAdapter
 // Use ExpressAdapter to provide custom controller factory
@@ -135,7 +135,7 @@ const adapter = new ExpressAdapter(app, {
   },
   namedMiddlewares: {
     auth: createAuthMiddleware(jwtService),
-    'roles:admin': requireRoles(['admin']),
+    'roles:admin': requireRoles('admin'),
   },
 });
 adapter.registerControllers([ProfileController]);

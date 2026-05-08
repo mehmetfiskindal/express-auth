@@ -9,8 +9,11 @@ import {
   Security,
   createRouterFromControllers,
   Middleware,
+  SchemaObject,
+  ReferenceObject,
 } from '@developersailor/express-openapi-decorators';
 import { createAuthMiddleware, requireRoles, JWTService } from '@developersailor/express-auth';
+import { ProfileResponse, AdminDataResponse, PublicDataResponse } from '../dto';
 
 /**
  * Profile Controller
@@ -33,8 +36,8 @@ export class ProfileController {
   @Summary('Get user profile')
   @Description('Get protected profile data for authenticated user')
   @Security('bearerAuth')
-  @ApiResponse(200, 'Profile data retrieved successfully', 'ProfileResponse')
-  @ApiResponse(401, 'Unauthorized')
+  @ApiResponse({ status: 200, description: 'Profile data retrieved successfully', type: ProfileResponse })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
   @Middleware('auth')
   async getProfile(req: Request, res: Response) {
     const user = (req as any).user;
@@ -54,9 +57,9 @@ export class ProfileController {
   @Summary('Get admin data')
   @Description('Get admin-only data (requires admin role)')
   @Security('bearerAuth')
-  @ApiResponse(200, 'Admin data retrieved successfully', 'AdminDataResponse')
-  @ApiResponse(401, 'Unauthorized')
-  @ApiResponse(403, 'Forbidden - requires admin role')
+  @ApiResponse({ status: 200, description: 'Admin data retrieved successfully', type: AdminDataResponse })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires admin role' })
   @Middleware('auth')
   @Middleware('roles:admin')
   async getAdminData(req: Request, res: Response) {
@@ -73,7 +76,7 @@ export class ProfileController {
   @Get('/public')
   @Summary('Get public data')
   @Description('Get public data (no authentication required)')
-  @ApiResponse(200, 'Public data retrieved successfully', 'PublicDataResponse')
+  @ApiResponse({ status: 200, description: 'Public data retrieved successfully', type: PublicDataResponse })
   async getPublicData(req: Request, res: Response) {
     res.json({ message: 'This is public data' });
   }
@@ -82,7 +85,7 @@ export class ProfileController {
 /**
  * Profile Request/Response Schemas for OpenAPI
  */
-export const ProfileSchemas = {
+export const ProfileSchemas: Record<string, SchemaObject | ReferenceObject> = {
   ProfileResponse: {
     type: 'object',
     properties: {

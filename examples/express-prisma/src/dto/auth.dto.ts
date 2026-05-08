@@ -53,21 +53,21 @@ export class MessageResponse {
 
 // Decorator stubs for validation (or you can use class-validator)
 function IsEmail() {
-  return function (target: any, propertyKey: string) {};
+  return function (target: any, propertyKey?: string | symbol, context?: any) {};
 }
 
 function IsString() {
-  return function (target: any, propertyKey: string) {};
+  return function (target: any, propertyKey?: string | symbol, context?: any) {};
 }
 
 function MinLength(min: number) {
-  return function (target: any, propertyKey: string) {};
+  return function (target: any, propertyKey?: string | symbol, context?: any) {};
 }
 
 function IsOptional() {
-  return function (target: any, propertyKey: string) {};
+  return function (target: any, propertyKey?: string | symbol, context?: any) {};
 }
 
 function IsArray() {
-  return function (target: any, propertyKey: string) {};
+  return function (target: any, propertyKey?: string | symbol, context?: any) {};
 }
