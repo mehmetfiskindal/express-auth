@@ -5,6 +5,8 @@ Secure, flexible authentication package for Express.js with JWT, refresh tokens,
 [![npm version](https://badge.fury.io/js/@developersailor%2Fexpress-auth.svg)](https://www.npmjs.com/package/@developersailor/express-auth)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+See [CHANGELOG.md](./CHANGELOG.md) for release notes and migration guidance.
+
 ## Features
 
 - 🔐 **JWT Authentication** - Secure access tokens with configurable expiration
@@ -95,6 +97,7 @@ This package follows security best practices:
 - ✅ **No secrets in code** - All secrets passed via configuration
 - ✅ **Strong password hashing** - bcrypt with configurable rounds
 - ✅ **Token rotation** - Refresh tokens are rotated on each use
+- ✅ **Hashed refresh token storage** - Refresh tokens are hashed before persistence by default
 - ✅ **Generic error messages** - No information leakage
 - ✅ **JWT best practices** - Algorithm explicitly set to HS256
 - ✅ **Secure by default** - Secure cookie settings
@@ -129,6 +132,18 @@ interface AuthConfig {
     userRepository: UserRepository;
     refreshTokenRepository: RefreshTokenRepository;
   };
+
+  // Optional: Registration configuration
+  registration?: {
+    defaultRoles?: string[];           // Default: ['user']
+    allowRolesFromRequest?: boolean;   // Default: false
+  };
+
+  // Optional: Hash refresh tokens before repository storage
+  // Default: true
+  // Migration note: enabling this for apps with existing raw refresh token
+  // records will require users to log in again.
+  hashRefreshTokens?: boolean;
   
   // Optional: Authorization configuration
   authorization?: {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { JWTPayload, TokenPair } from '../types';
 
@@ -67,6 +68,7 @@ export class JWTService {
     const refreshToken = jwt.sign(
       {
         sub: payload.sub,
+        jti: randomUUID(),
         type: 'refresh',
         iat: now,
         exp: now + refreshExpiresInSeconds,
@@ -107,6 +109,20 @@ export class JWTService {
     };
 
     return value * multipliers[unit];
+  }
+
+  /**
+   * Access token süresini saniye cinsinden döndür
+   */
+  getAccessTokenExpiresInSeconds(): number {
+    return this.parseExpiresIn(this.accessTokenExpiresIn);
+  }
+
+  /**
+   * Refresh token süresini saniye cinsinden döndür
+   */
+  getRefreshTokenExpiresInSeconds(): number {
+    return this.parseExpiresIn(this.refreshTokenExpiresIn);
   }
 
   /**

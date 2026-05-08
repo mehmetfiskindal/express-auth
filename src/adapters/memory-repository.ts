@@ -74,6 +74,17 @@ export class MemoryRefreshTokenRepository implements RefreshTokenRepository {
     }
   }
 
+  async consumeToken(token: string): Promise<RefreshTokenRecord | null> {
+    const record = this.tokens.get(token);
+    if (!record || record.revokedAt) return null;
+
+    const consumedRecord = { ...record };
+    record.revokedAt = new Date();
+    this.tokens.set(token, record);
+
+    return consumedRecord;
+  }
+
   async revokeAllUserTokens(userId: string): Promise<void> {
     for (const [token, record] of this.tokens.entries()) {
       if (record.userId === userId && !record.revokedAt) {

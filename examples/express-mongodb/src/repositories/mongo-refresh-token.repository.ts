@@ -38,6 +38,25 @@ export class MongoRefreshTokenRepository implements RefreshTokenRepository {
     );
   }
 
+  async consumeToken(token: string): Promise<RefreshTokenRecord | null> {
+    const record = await RefreshTokenModel.findOneAndUpdate(
+      {
+        token,
+        revokedAt: null,
+      },
+      { $set: { revokedAt: new Date() } }
+    ).lean();
+
+    if (!record) return null;
+
+    return {
+      token: record.token,
+      userId: record.userId.toString(),
+      expiresAt: record.expiresAt,
+      createdAt: record.createdAt,
+    };
+  }
+
   async revokeAllUserTokens(userId: string): Promise<void> {
     await RefreshTokenModel.updateMany(
       { 

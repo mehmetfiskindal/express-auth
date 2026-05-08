@@ -43,6 +43,28 @@ export class MySQLRefreshTokenRepository implements RefreshTokenRepository {
     );
   }
 
+  async consumeToken(token: string): Promise<RefreshTokenRecord | null> {
+    const result = await this.tokenRepo.update(
+      { token, revokedAt: null },
+      { revokedAt: new Date() }
+    );
+
+    if (!result.affected) return null;
+
+    const record = await this.tokenRepo.findOne({
+      where: { token }
+    });
+
+    if (!record) return null;
+
+    return {
+      token: record.token,
+      userId: record.userId,
+      expiresAt: record.expiresAt,
+      createdAt: record.createdAt,
+    };
+  }
+
   async revokeAllUserTokens(userId: string): Promise<void> {
     await this.tokenRepo.update(
       { userId, revokedAt: null },

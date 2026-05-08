@@ -42,6 +42,31 @@ export class PrismaRefreshTokenRepository implements RefreshTokenRepository {
     });
   }
 
+  async consumeToken(token: string): Promise<RefreshTokenRecord | null> {
+    const result = await this.prisma.refreshToken.updateMany({
+      where: {
+        token,
+        revokedAt: null,
+      },
+      data: { revokedAt: new Date() },
+    });
+
+    if (result.count === 0) return null;
+
+    const record = await this.prisma.refreshToken.findUnique({
+      where: { token },
+    });
+
+    if (!record) return null;
+
+    return {
+      token: record.token,
+      userId: record.userId,
+      expiresAt: record.expiresAt,
+      createdAt: record.createdAt,
+    };
+  }
+
   async revokeAllUserTokens(userId: string): Promise<void> {
     await this.prisma.refreshToken.updateMany({
       where: {

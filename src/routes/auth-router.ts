@@ -1,7 +1,14 @@
+import { createHash } from 'crypto';
 import { Router, Request, Response } from 'express';
 import { JWTService, PasswordService, SecurityMonitor, TokenCleanupJob } from '../services';
-import { AuthConfig, LoginResult, RefreshResult, AuthenticatedRequest } from '../types';
+import { AuthConfig, LoginResult, RefreshResult, AuthenticatedRequest, AuthUser } from '../types';
 import { createAuthMiddleware } from '../middleware';
+
+function omitPasswordHash(user: AuthUser): Omit<AuthUser, 'passwordHash'> {
+  const { passwordHash, ...userWithoutPassword } = user;
+  void passwordHash;
+  return userWithoutPassword;
+}
 
 /**
  * Auth Router oluştur
@@ -20,9 +27,21 @@ export function createAuthRouter(config: AuthConfig): Router {
   const { userRepository, refreshTokenRepository } = config.repositories;
 
   // Authorization config
-  const getRoles = config.authorization?.getRoles || ((user: any) => user.roles || []);
-  const getPermissions = config.authorization?.getPermissions || ((user: any) => user.permissions || []);
+  const getRoles = config.authorization?.getRoles || ((user: AuthUser) => user.roles || []);
+  const getPermissions = config.authorization?.getPermissions || ((user: AuthUser) => user.permissions || []);
   const loadUserOnRequest = config.authorization?.loadUserOnRequest || false;
+  const hashRefreshTokens = config.hashRefreshTokens !== false;
+  const refreshTokenExpiresInSeconds = jwtService.getRefreshTokenExpiresInSeconds();
+  const refreshTokenMaxAgeMs = refreshTokenExpiresInSeconds * 1000;
+
+  const getRefreshTokenStorageValue = (token: string): string => {
+    if (!hashRefreshTokens) return token;
+    return createHash('sha256').update(token).digest('hex');
+  };
+
+  const getRefreshTokenExpiresAt = (): Date => {
+    return new Date(Date.now() + refreshTokenMaxAgeMs);
+  };
 
   // Error messages (güvenlik için genel mesajlar)
   const errorMessages = {
@@ -96,14 +115,19 @@ export function createAuthRouter(config: AuthConfig): Router {
       const passwordHash = await passwordService.hashPassword(password);
 
       // Kullanıcı oluştur
+      const defaultRoles = config.registration?.defaultRoles || ['user'];
+      const assignedRoles = config.registration?.allowRolesFromRequest
+        ? roles || defaultRoles
+        : defaultRoles;
+
       const user = await userRepository.createUser({
         email,
         passwordHash,
-        roles: roles || ['user'],
+        roles: assignedRoles,
       });
 
       // Response'ta passwordHash dönmeyelim
-      const { passwordHash: _, ...userWithoutPassword } = user;
+      const userWithoutPassword = omitPasswordHash(user);
 
       res.status(201).json({
         message: 'User registered successfully',
@@ -183,13 +207,10 @@ export function createAuthRouter(config: AuthConfig): Router {
       });
 
       // Refresh token'ı DB'ye kaydet
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 7); // 7 gün
-
       await refreshTokenRepository.saveToken({
-        token: tokens.refreshToken,
+        token: getRefreshTokenStorageValue(tokens.refreshToken),
         userId: user.id,
-        expiresAt,
+        expiresAt: getRefreshTokenExpiresAt(),
         createdAt: new Date(),
       });
 
@@ -201,12 +222,12 @@ export function createAuthRouter(config: AuthConfig): Router {
           sameSite: config.cookie.sameSite ?? 'strict',
           domain: config.cookie.domain,
           path: config.cookie.path ?? '/auth/refresh',
-          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 gün
+          maxAge: refreshTokenMaxAgeMs,
         });
       }
 
       // Response
-      const { passwordHash: _, ...userWithoutPassword } = user;
+      const userWithoutPassword = omitPasswordHash(user);
 
       const result: LoginResult = {
         user: userWithoutPassword,
@@ -244,7 +265,11 @@ export function createAuthRouter(config: AuthConfig): Router {
       }
 
       // Token DB'de kayıtlı mı ve revoke edilmemiş mi?
-      const storedToken = await refreshTokenRepository.findToken(refreshToken);
+      const storedRefreshToken = getRefreshTokenStorageValue(refreshToken);
+      const storedToken = refreshTokenRepository.consumeToken
+        ? await refreshTokenRepository.consumeToken(storedRefreshToken)
+        : await refreshTokenRepository.findToken(storedRefreshToken);
+
       if (!storedToken || storedToken.revokedAt) {
         res.status(401).json({ error: errorMessages.invalidToken });
         return;
@@ -264,7 +289,9 @@ export function createAuthRouter(config: AuthConfig): Router {
       }
 
       // Eski refresh token'ı revoke et (token rotation)
-      await refreshTokenRepository.revokeToken(refreshToken);
+      if (!refreshTokenRepository.consumeToken) {
+        await refreshTokenRepository.revokeToken(storedRefreshToken);
+      }
 
       // Yeni token çifti üret - güncel roller ve permission'lar
       const tokens = jwtService.generateTokenPair({
@@ -275,13 +302,10 @@ export function createAuthRouter(config: AuthConfig): Router {
       });
 
       // Yeni refresh token'ı kaydet
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 7);
-
       await refreshTokenRepository.saveToken({
-        token: tokens.refreshToken,
+        token: getRefreshTokenStorageValue(tokens.refreshToken),
         userId: user.id,
-        expiresAt,
+        expiresAt: getRefreshTokenExpiresAt(),
         createdAt: new Date(),
       });
 
@@ -293,7 +317,7 @@ export function createAuthRouter(config: AuthConfig): Router {
           sameSite: config.cookie.sameSite ?? 'strict',
           domain: config.cookie.domain,
           path: config.cookie.path ?? '/auth/refresh',
-          maxAge: 7 * 24 * 60 * 60 * 1000,
+          maxAge: refreshTokenMaxAgeMs,
         });
       }
 
@@ -326,7 +350,7 @@ export function createAuthRouter(config: AuthConfig): Router {
 
       if (refreshToken) {
         // Token'ı revoke et
-        await refreshTokenRepository.revokeToken(refreshToken);
+        await refreshTokenRepository.revokeToken(getRefreshTokenStorageValue(refreshToken));
       }
 
       // Record logout
@@ -416,7 +440,7 @@ export function createAuthRouter(config: AuthConfig): Router {
       }
 
       // Password hash'i hariç tut
-      const { passwordHash: _, ...userWithoutPassword } = userDetails;
+      const userWithoutPassword = omitPasswordHash(userDetails);
 
       res.json({ user: userWithoutPassword });
     } catch (error) {

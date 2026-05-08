@@ -98,6 +98,23 @@ export interface AuthConfig {
   repositories: AuthRepositories;
 
   /**
+   * Registration yapılandırması
+   */
+  registration?: {
+    /**
+     * Public register endpoint'i için atanacak varsayılan roller.
+     * Varsayılan: ['user']
+     */
+    defaultRoles?: string[];
+
+    /**
+     * Kullanıcının request body içinden rol göndermesine izin ver.
+     * Güvenlik sebebiyle varsayılan: false
+     */
+    allowRolesFromRequest?: boolean;
+  };
+
+  /**
    * Authorization yapılandırması
    */
   authorization?: AuthorizationConfig;
@@ -112,6 +129,12 @@ export interface AuthConfig {
     domain?: string;
     path?: string;
   };
+
+  /**
+   * Refresh token'ları repository'ye kaydetmeden önce hash'le.
+   * Varsayılan: true
+   */
+  hashRefreshTokens?: boolean;
 
   /**
    * Password validasyon kuralları
@@ -178,6 +201,7 @@ export interface JWTPayload {
   email: string;
   roles: string[];
   permissions?: Permission[]; // Opsiyonel: kullanıcı permission'ları
+  jti?: string;
   iat: number;
   exp: number;
   type: 'access' | 'refresh';

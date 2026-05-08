@@ -41,6 +41,33 @@ export class MSSQLRefreshTokenRepository implements RefreshTokenRepository {
     );
   }
 
+  async consumeToken(token: string): Promise<RefreshTokenRecord | null> {
+    const [affectedCount] = await this.tokenModel.update(
+      { revokedAt: new Date() },
+      {
+        where: {
+          token,
+          revokedAt: null
+        }
+      }
+    );
+
+    if (affectedCount === 0) return null;
+
+    const record = await this.tokenModel.findOne({
+      where: { token }
+    });
+
+    if (!record) return null;
+
+    return {
+      token: record.token,
+      userId: record.userId,
+      expiresAt: record.expiresAt,
+      createdAt: record.createdAt,
+    };
+  }
+
   async revokeAllUserTokens(userId: string): Promise<void> {
     await this.tokenModel.update(
       { revokedAt: new Date() },

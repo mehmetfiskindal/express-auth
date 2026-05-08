@@ -1,9 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { JWTService } from '../services';
-import { AuthenticatedRequest, JWTPayload, UserRepository, AuthorizationConfig } from '../types';
+import { AuthenticatedRequest, JWTPayload, UserRepository, AuthorizationConfig, AuthUser } from '../types';
 
 // Simple in-memory cache for user data
-const userCache = new Map<string, { user: any; expiresAt: number }>();
+const userCache = new Map<string, { user: AuthUser; expiresAt: number }>();
 
 /**
  * Clear user cache (useful for testing or manual cache invalidation)
@@ -15,7 +15,7 @@ export function clearUserCache(): void {
 /**
  * Get cached user or null
  */
-function getCachedUser(userId: string): any | null {
+function getCachedUser(userId: string): AuthUser | null {
   const cached = userCache.get(userId);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.user;
@@ -29,7 +29,7 @@ function getCachedUser(userId: string): any | null {
 /**
  * Set user in cache
  */
-function setCachedUser(userId: string, user: any, ttlSeconds: number): void {
+function setCachedUser(userId: string, user: AuthUser, ttlSeconds: number): void {
   userCache.set(userId, {
     user,
     expiresAt: Date.now() + (ttlSeconds * 1000),
@@ -60,8 +60,8 @@ export function createAuthMiddleware(
   const loadUserOnRequest = options?.authorization?.loadUserOnRequest || false;
   const userRepository = options?.userRepository;
   const cacheTTL = options?.authorization?.userCacheTTL || 60;
-  const getRoles = options?.authorization?.getRoles || ((user: any) => user.roles || []);
-  const getPermissions = options?.authorization?.getPermissions || ((user: any) => user.permissions || []);
+  const getRoles = options?.authorization?.getRoles || ((user: AuthUser) => user.roles || []);
+  const getPermissions = options?.authorization?.getPermissions || ((user: AuthUser) => user.permissions || []);
 
   return async function authMiddleware(
     req: Request,
@@ -90,7 +90,12 @@ export function createAuthMiddleware(
       let finalPayload: JWTPayload = payload;
 
       // If loadUserOnRequest is enabled, fetch fresh user data from DB
-      if (loadUserOnRequest && userRepository) {
+      if (loadUserOnRequest) {
+        if (!userRepository) {
+          res.status(500).json({ error: 'Auth middleware is missing userRepository' });
+          return;
+        }
+
         try {
           // Check cache first
           let user = getCachedUser(payload.sub);
@@ -105,17 +110,21 @@ export function createAuthMiddleware(
             }
           }
 
-          if (user) {
-            // Update payload with fresh roles/permissions from DB
-            finalPayload = {
-              ...payload,
-              roles: getRoles(user),
-              permissions: getPermissions(user),
-            };
+          if (!user || user.isActive === false) {
+            res.status(401).json({ error: messages.unauthorized });
+            return;
           }
+
+          // Update payload with fresh roles/permissions from DB
+          finalPayload = {
+            ...payload,
+            roles: getRoles(user),
+            permissions: getPermissions(user),
+          };
         } catch (dbError) {
           console.error('Error loading user from DB:', dbError);
-          // Continue with JWT payload if DB fetch fails
+          res.status(503).json({ error: 'Unable to verify user' });
+          return;
         }
       }
 

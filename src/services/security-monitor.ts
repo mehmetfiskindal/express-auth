@@ -378,6 +378,7 @@ export class SecurityMonitor extends EventEmitter {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
+    this.rateLimitService.stopCleanupJob();
   }
 
   /**
