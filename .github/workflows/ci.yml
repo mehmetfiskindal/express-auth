@@ -14,7 +14,10 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          # eslint@10 requires a Node build with a stable util.styleText
+          # (>=22.13.0); some GitHub-hosted runners cache an older 22.x that
+          # predates that, so pin to the 24.x line where it's unconditionally supported.
+          node-version: 24.x
           cache: npm
 
       - name: Install dependencies
