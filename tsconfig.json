@@ -22,10 +22,11 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    },
+    // "node" (node10) module resolution is deprecated as of TS 6.0 and will
+    // be removed in TS 7. @typescript-eslint doesn't support TS 7 yet
+    // (peer range is "<6.1.0"), so we're pinned to TS 6.0.3 for now and
+    // silencing the deprecation notice rather than migrating early.
+    "ignoreDeprecations": "6.0",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "experimentalDecorators": true,
