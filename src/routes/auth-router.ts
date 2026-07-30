@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
-import { Router, Request, Response } from 'express';
-import { JWTService, PasswordService, SecurityMonitor, TokenCleanupJob } from '../services';
+import { Router, Request, Response, NextFunction } from 'express';
+import { JWTService, PasswordService, SecurityMonitor, TokenCleanupJob, RateLimitService, createAuthRateLimiter } from '../services';
 import { AuthConfig, LoginResult, RefreshResult, AuthenticatedRequest, AuthUser } from '../types';
 import { createAuthMiddleware } from '../middleware';
 
@@ -53,6 +53,14 @@ export function createAuthRouter(config: AuthConfig): Router {
   // Initialize security monitor
   const securityMonitor = new SecurityMonitor(config.securityMonitor);
 
+  // Initialize rate limiter for auth endpoints (on by default)
+  const authRateLimiter: RateLimitService | null = config.rateLimit?.enabled !== false
+    ? createAuthRateLimiter(config.rateLimit?.auth)
+    : null;
+  const rateLimitMiddleware = authRateLimiter
+    ? authRateLimiter.middleware.bind(authRateLimiter)
+    : (_req: Request, _res: Response, next: NextFunction): void => next();
+
   // Initialize token cleanup job
   let tokenCleanupJob: TokenCleanupJob | null = null;
   if (config.tokenCleanup?.enabled !== false) {
@@ -76,7 +84,7 @@ export function createAuthRouter(config: AuthConfig): Router {
   /**
    * POST /auth/register
    */
-  router.post('/register', async (req: Request, res: Response): Promise<void> => {
+  router.post('/register', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
     try {
       const { email, password, roles } = req.body;
 
@@ -142,7 +150,7 @@ export function createAuthRouter(config: AuthConfig): Router {
   /**
    * POST /auth/login
    */
-  router.post('/login', async (req: Request, res: Response): Promise<void> => {
+  router.post('/login', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
     const ip = getClientIP(req);
     const userAgent = getUserAgent(req);
 
@@ -245,7 +253,7 @@ export function createAuthRouter(config: AuthConfig): Router {
    * POST /auth/refresh
    * Refresh token ile yeni access token al
    */
-  router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
+  router.post('/refresh', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
     try {
       // Cookie veya body'den refresh token al
       const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
@@ -486,6 +494,7 @@ export function createAuthRouter(config: AuthConfig): Router {
   // Attach security monitor and cleanup job to router for external access
   (router as any).securityMonitor = securityMonitor;
   (router as any).tokenCleanupJob = tokenCleanupJob;
+  (router as any).rateLimiter = authRateLimiter;
 
   return router;
 }

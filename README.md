@@ -490,13 +490,36 @@ PORT=3000
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```
 
+## Rate Limiting
+
+`createAuthRouter` applies rate limiting to `/register`, `/login`, and `/refresh` **by default** — 5 requests per 15 minutes per IP. No manual wiring is required.
+
+Customize or disable it via `rateLimit` in `AuthConfig`:
+
+```typescript
+const authRouter = createAuthRouter({
+  jwtSecret: process.env.JWT_SECRET!,
+  refreshTokenSecret: process.env.REFRESH_TOKEN_SECRET!,
+  repositories,
+  rateLimit: {
+    // enabled: false,           // turn off entirely (not recommended in production)
+    auth: {
+      windowMs: 15 * 60 * 1000,  // 15 minutes
+      maxRequests: 5,
+    },
+  },
+});
+```
+
+This only covers the auth router's own endpoints. `createSecurityMiddleware` (from `@developersailor/express-auth`) can additionally be applied to the rest of your app for general-purpose rate limiting on non-auth routes.
+
 ## Security Checklist
 
 Before going to production:
 
 - [x] Use strong JWT secrets (min 32 chars, random)
 - [x] Enable HTTPS (secure cookies)
-- [x] Set up rate limiting
+- [x] Rate limiting on auth endpoints (on by default, see [Rate Limiting](#rate-limiting))
 - [x] Configure CORS properly
 - [x] Use environment variables for secrets
 - [x] Enable password validation rules

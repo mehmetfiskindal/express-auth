@@ -42,7 +42,7 @@ export class RateLimitService {
       maxRequests: config.maxRequests ?? 100,
       skipSuccessfulRequests: config.skipSuccessfulRequests ?? false,
       keyGenerator: config.keyGenerator ?? ((req: any) => req.ip || req.connection?.remoteAddress || 'unknown'),
-      handler: config.handler ?? this.defaultHandler,
+      handler: config.handler ?? this.defaultHandler.bind(this),
       skip: config.skip ?? (() => false),
     };
 

@@ -35,9 +35,11 @@ async function withServer(
     const routerWithJobs = authRouter as typeof authRouter & {
       securityMonitor?: { stopCleanupJob(): void };
       tokenCleanupJob?: { stop(): void } | null;
+      rateLimiter?: { stopCleanupJob(): void } | null;
     };
     routerWithJobs.securityMonitor?.stopCleanupJob();
     routerWithJobs.tokenCleanupJob?.stop();
+    routerWithJobs.rateLimiter?.stopCleanupJob();
   }
 }
 
@@ -63,6 +65,7 @@ describe('critical auth behavior', () => {
       refreshTokenSecret,
       repositories,
       tokenCleanup: { enabled: false },
+      rateLimit: { enabled: false },
     }, async baseUrl => {
       const response = await postJson(baseUrl, '/auth/register', {
         email: 'role-test@example.com',
@@ -86,6 +89,7 @@ describe('critical auth behavior', () => {
       refreshTokenExpiresIn: '2h',
       repositories,
       tokenCleanup: { enabled: false },
+      rateLimit: { enabled: false },
     }, async baseUrl => {
       await postJson(baseUrl, '/auth/register', {
         email: 'expiry-test@example.com',
@@ -118,6 +122,7 @@ describe('critical auth behavior', () => {
       refreshTokenSecret,
       repositories,
       tokenCleanup: { enabled: false },
+      rateLimit: { enabled: false },
     }, async baseUrl => {
       await postJson(baseUrl, '/auth/register', {
         email: 'rotation-test@example.com',
@@ -184,5 +189,27 @@ describe('critical auth behavior', () => {
 
     expect(res.statusCode).toBe(401);
     expect(nextCalled).toBe(false);
+  });
+
+  it('rate limits /login by default once the configured request count is exceeded', async () => {
+    const repositories = createMemoryRepositories();
+
+    await withServer({
+      jwtSecret,
+      refreshTokenSecret,
+      repositories,
+      tokenCleanup: { enabled: false },
+      rateLimit: { auth: { maxRequests: 2, windowMs: 60_000 } },
+    }, async baseUrl => {
+      const credentials = { email: 'rate-limit-test@example.com', password: 'wrong-password' };
+
+      const first = await postJson(baseUrl, '/auth/login', credentials);
+      const second = await postJson(baseUrl, '/auth/login', credentials);
+      const third = await postJson(baseUrl, '/auth/login', credentials);
+
+      expect(first.status).toBe(401);
+      expect(second.status).toBe(401);
+      expect(third.status).toBe(429);
+    });
   });
 });
