@@ -1,13 +1,35 @@
 import { createHash } from 'crypto';
 import { Router, Request, Response, NextFunction } from 'express';
-import { JWTService, PasswordService, SecurityMonitor, TokenCleanupJob, RateLimitService, createAuthRateLimiter } from '../services';
-import { AuthConfig, LoginResult, RefreshResult, AuthenticatedRequest, AuthUser } from '../types';
+import {
+  JWTService, PasswordService, SecurityMonitor, TokenCleanupJob,
+  RateLimitService, createAuthRateLimiter,
+  CSRFService, createCSRFService,
+  MFAService, createMFAService,
+  PasswordResetService, createPasswordResetService,
+} from '../services';
+import {
+  AuthConfig, LoginResult, RefreshResult, AuthenticatedRequest, AuthUser, TokenPair,
+  MfaChallengeResult, MfaSetupResult, MfaEnableResult, PublicAuthUser,
+} from '../types';
 import { createAuthMiddleware } from '../middleware';
 
-function omitPasswordHash(user: AuthUser): Omit<AuthUser, 'passwordHash'> {
-  const { passwordHash, ...userWithoutPassword } = user;
-  void passwordHash;
-  return userWithoutPassword;
+const SENSITIVE_USER_FIELDS = [
+  'passwordHash',
+  'mfaSecret',
+  'mfaBackupCodeHashes',
+  'passwordResetTokenHash',
+  'passwordResetExpiresAt',
+] as const;
+
+/**
+ * Strip secrets/hashes before putting a user object in an API response or host callback.
+ */
+function toPublicUser(user: AuthUser): PublicAuthUser {
+  const publicUser = { ...user } as Record<string, unknown>;
+  for (const field of SENSITIVE_USER_FIELDS) {
+    delete publicUser[field];
+  }
+  return publicUser as PublicAuthUser;
 }
 
 /**
@@ -61,12 +83,101 @@ export function createAuthRouter(config: AuthConfig): Router {
     ? authRateLimiter.middleware.bind(authRateLimiter)
     : (_req: Request, _res: Response, next: NextFunction): void => next();
 
+  // Per-user MFA challenge limiter (in addition to IP-based auth rate limit).
+  // Prevents distributed brute-force against a stolen challengeToken.
+  const mfaVerifyRateLimiter: RateLimitService | null = config.rateLimit?.enabled !== false
+    ? createAuthRateLimiter(config.rateLimit?.auth)
+    : null;
+
+  // Initialize CSRF protection (double-submit cookie; on by default for cookie flows)
+  const csrfService: CSRFService | null = config.cookie && config.csrf?.enabled !== false
+    ? createCSRFService(config.csrf)
+    : null;
+
+  // CSRF is only enforced when the refresh token arrives via cookie (ambient
+  // authority). Body-based clients don't carry the CSRF attack vector.
+  const csrfGuard = (req: Request, res: Response, next: NextFunction): void => {
+    if (!csrfService || !(req as Request & { cookies?: Record<string, string> }).cookies?.refreshToken) {
+      next();
+      return;
+    }
+    csrfService.middleware(req, res, next);
+  };
+
+  // Issue a fresh CSRF token cookie alongside the refresh token cookie.
+  // Must NOT be httpOnly: the client reads it and echoes it in the CSRF header.
+  const issueCsrfToken = (res: Response): string | undefined => {
+    if (!csrfService || !config.cookie) return undefined;
+    const token = csrfService.generateToken();
+    res.cookie(csrfService.getCookieName(), token, {
+      httpOnly: false,
+      secure: config.cookie.secure ?? process.env.NODE_ENV === 'production',
+      sameSite: config.cookie.sameSite ?? 'strict',
+      domain: config.cookie.domain,
+      path: '/',
+      maxAge: refreshTokenMaxAgeMs,
+    });
+    return token;
+  };
+
+  const clearCsrfCookie = (res: Response): void => {
+    if (!csrfService || !config.cookie) return;
+    res.clearCookie(csrfService.getCookieName(), {
+      httpOnly: false,
+      secure: config.cookie.secure ?? process.env.NODE_ENV === 'production',
+      sameSite: config.cookie.sameSite ?? 'strict',
+      domain: config.cookie.domain,
+      path: '/',
+    });
+  };
+
   // Initialize token cleanup job
   let tokenCleanupJob: TokenCleanupJob | null = null;
   if (config.tokenCleanup?.enabled !== false) {
     tokenCleanupJob = new TokenCleanupJob(refreshTokenRepository, config.tokenCleanup);
     tokenCleanupJob.start();
   }
+
+  // Initialize MFA + password reset services (no background jobs, cheap to always create)
+  const mfaService: MFAService = createMFAService(config.mfa);
+  const passwordResetService: PasswordResetService = createPasswordResetService(config.passwordReset);
+
+  // Parola sıfırlama ve MFA, repository'nin opsiyonel `updateUser` metoduna
+  // dayanır. İmplemente edilmediyse bu özelliklerin route'ları hiç eklenmez.
+  const supportsUserUpdate = typeof userRepository.updateUser === 'function';
+  const supportsPasswordReset = supportsUserUpdate && typeof userRepository.findByPasswordResetToken === 'function';
+
+  // Login/mfa-verify sonrası ortak token üretim + cookie/CSRF akışı
+  const issueAuthTokens = async (user: AuthUser, res: Response): Promise<{ tokens: TokenPair; csrfToken?: string }> => {
+    const tokens = jwtService.generateTokenPair({
+      sub: user.id,
+      email: user.email,
+      roles: getRoles(user),
+      permissions: getPermissions(user),
+    });
+
+    await refreshTokenRepository.saveToken({
+      token: getRefreshTokenStorageValue(tokens.refreshToken),
+      userId: user.id,
+      expiresAt: getRefreshTokenExpiresAt(),
+      createdAt: new Date(),
+    });
+
+    let csrfToken: string | undefined;
+    if (config.cookie) {
+      res.cookie('refreshToken', tokens.refreshToken, {
+        httpOnly: config.cookie.httpOnly ?? true,
+        secure: config.cookie.secure ?? process.env.NODE_ENV === 'production',
+        sameSite: config.cookie.sameSite ?? 'strict',
+        domain: config.cookie.domain,
+        path: config.cookie.path ?? '/auth/refresh',
+        maxAge: refreshTokenMaxAgeMs,
+      });
+      csrfToken = issueCsrfToken(res);
+    }
+
+    return { tokens, csrfToken };
+  };
 
   // Helper to get IP address
   const getClientIP = (req: Request): string => {
@@ -134,8 +245,8 @@ export function createAuthRouter(config: AuthConfig): Router {
         roles: assignedRoles,
       });
 
-      // Response'ta passwordHash dönmeyelim
-      const userWithoutPassword = omitPasswordHash(user);
+      // Response'ta secret alanları dönmeyelim
+      const userWithoutPassword = toPublicUser(user);
 
       res.status(201).json({
         message: 'User registered successfully',
@@ -206,40 +317,23 @@ export function createAuthRouter(config: AuthConfig): Router {
       // Record successful login
       securityMonitor.recordSuccessfulLogin(user.id, ip, userAgent);
 
-      // Token üret - roller ve permission'lar JWT'ye eklenir
-      const tokens = jwtService.generateTokenPair({
-        sub: user.id,
-        email: user.email,
-        roles: getRoles(user),
-        permissions: getPermissions(user),
-      });
-
-      // Refresh token'ı DB'ye kaydet
-      await refreshTokenRepository.saveToken({
-        token: getRefreshTokenStorageValue(tokens.refreshToken),
-        userId: user.id,
-        expiresAt: getRefreshTokenExpiresAt(),
-        createdAt: new Date(),
-      });
-
-      // Cookie ayarları (opsiyonel)
-      if (config.cookie) {
-        res.cookie('refreshToken', tokens.refreshToken, {
-          httpOnly: config.cookie.httpOnly ?? true,
-          secure: config.cookie.secure ?? process.env.NODE_ENV === 'production',
-          sameSite: config.cookie.sameSite ?? 'strict',
-          domain: config.cookie.domain,
-          path: config.cookie.path ?? '/auth/refresh',
-          maxAge: refreshTokenMaxAgeMs,
-        });
+      // MFA aktifse tam token yerine kısa ömürlü bir challenge döndür
+      if (user.mfaEnabled) {
+        const challengeToken = jwtService.generateMfaChallengeToken({ sub: user.id });
+        const challenge: MfaChallengeResult = { mfaRequired: true, challengeToken };
+        res.json(challenge);
+        return;
       }
 
+      const { tokens, csrfToken } = await issueAuthTokens(user, res);
+
       // Response
-      const userWithoutPassword = omitPasswordHash(user);
+      const userWithoutPassword = toPublicUser(user);
 
       const result: LoginResult = {
         user: userWithoutPassword,
         tokens,
+        csrfToken,
       };
 
       res.json(result);
@@ -253,7 +347,7 @@ export function createAuthRouter(config: AuthConfig): Router {
    * POST /auth/refresh
    * Refresh token ile yeni access token al
    */
-  router.post('/refresh', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
+  router.post('/refresh', rateLimitMiddleware, csrfGuard, async (req: Request, res: Response): Promise<void> => {
     try {
       // Cookie veya body'den refresh token al
       const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
@@ -301,38 +395,14 @@ export function createAuthRouter(config: AuthConfig): Router {
         await refreshTokenRepository.revokeToken(storedRefreshToken);
       }
 
-      // Yeni token çifti üret - güncel roller ve permission'lar
-      const tokens = jwtService.generateTokenPair({
-        sub: user.id,
-        email: user.email,
-        roles: getRoles(user),
-        permissions: getPermissions(user),
-      });
-
-      // Yeni refresh token'ı kaydet
-      await refreshTokenRepository.saveToken({
-        token: getRefreshTokenStorageValue(tokens.refreshToken),
-        userId: user.id,
-        expiresAt: getRefreshTokenExpiresAt(),
-        createdAt: new Date(),
-      });
-
-      // Cookie güncelle
-      if (config.cookie) {
-        res.cookie('refreshToken', tokens.refreshToken, {
-          httpOnly: config.cookie.httpOnly ?? true,
-          secure: config.cookie.secure ?? process.env.NODE_ENV === 'production',
-          sameSite: config.cookie.sameSite ?? 'strict',
-          domain: config.cookie.domain,
-          path: config.cookie.path ?? '/auth/refresh',
-          maxAge: refreshTokenMaxAgeMs,
-        });
-      }
+      // Yeni token çifti üret (rotation) - roller/permission'lar güncel, cookie/CSRF dahil
+      const { tokens, csrfToken } = await issueAuthTokens(user, res);
 
       const result: RefreshResult = {
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         expiresIn: tokens.expiresIn,
+        csrfToken,
       };
 
       res.json(result);
@@ -341,6 +411,342 @@ export function createAuthRouter(config: AuthConfig): Router {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
+
+  // MFA route'ları sadece repository `updateUser`'ı implemente ettiyse eklenir
+  // (secret/backup code/enabled durumu kalıcı olarak saklanamıyorsa bu
+  // özellik hiçbir zaman gerçekten çalışamaz).
+  if (supportsUserUpdate) {
+    const updateUser = userRepository.updateUser!.bind(userRepository);
+
+    /**
+     * POST /auth/mfa/setup
+     * Yeni bir TOTP secret üret (henüz etkinleştirilmedi).
+     * MFA zaten açıksa erişim reddedilir — aksi halde çalınmış access token ile MFA kapatılabilir.
+     */
+    router.post('/mfa/setup', createAuthMiddleware(jwtService, {
+      errorMessages: config.errorMessages,
+      userRepository: loadUserOnRequest ? userRepository : undefined,
+      authorization: config.authorization,
+    }), async (req: Request, res: Response): Promise<void> => {
+      try {
+        const authUser = (req as AuthenticatedRequest).user;
+        if (!authUser) {
+          res.status(401).json({ error: errorMessages.unauthorized });
+          return;
+        }
+
+        const user = await userRepository.findById(authUser.sub);
+        if (!user) {
+          res.status(404).json({ error: 'User not found' });
+          return;
+        }
+
+        if (user.mfaEnabled) {
+          res.status(409).json({
+            error: 'MFA is already enabled. Disable MFA before starting a new setup.',
+          });
+          return;
+        }
+
+        const secret = mfaService.generateSecret();
+        await updateUser(user.id, { mfaSecret: secret, mfaEnabled: false });
+
+        const result: MfaSetupResult = {
+          secret,
+          otpauthUrl: mfaService.getOtpAuthUrl(user.email, secret),
+        };
+
+        res.json(result);
+      } catch (error) {
+        console.error('MFA setup error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    /**
+     * POST /auth/mfa/enable
+     * /mfa/setup ile üretilen secret'ı bir TOTP koduyla doğrulayıp MFA'yı etkinleştir
+     */
+    router.post('/mfa/enable', createAuthMiddleware(jwtService, {
+      errorMessages: config.errorMessages,
+      userRepository: loadUserOnRequest ? userRepository : undefined,
+      authorization: config.authorization,
+    }), async (req: Request, res: Response): Promise<void> => {
+      try {
+        const authUser = (req as AuthenticatedRequest).user;
+        if (!authUser) {
+          res.status(401).json({ error: errorMessages.unauthorized });
+          return;
+        }
+
+        const { code } = req.body;
+        if (!code) {
+          res.status(400).json({ error: 'code is required' });
+          return;
+        }
+
+        const user = await userRepository.findById(authUser.sub);
+        if (!user || !user.mfaSecret) {
+          res.status(400).json({ error: 'MFA setup has not been started. Call /mfa/setup first.' });
+          return;
+        }
+
+        if (user.mfaEnabled) {
+          res.status(409).json({ error: 'MFA is already enabled' });
+          return;
+        }
+
+        const isValid = await mfaService.verifyToken(code, user.mfaSecret);
+        if (!isValid) {
+          res.status(401).json({ error: 'Invalid MFA code' });
+          return;
+        }
+
+        // Yedek kodlar SADECE burada, tek seferlik, düz metin olarak dönülür
+        const backupCodes = mfaService.generateBackupCodes();
+        const mfaBackupCodeHashes = backupCodes.map(c => mfaService.hashBackupCode(c));
+
+        await updateUser(user.id, { mfaEnabled: true, mfaBackupCodeHashes });
+        // MFA zorunlu hale geldi — mevcut oturumlar MFA'sız kalmasın
+        await refreshTokenRepository.revokeAllUserTokens(user.id);
+
+        const result: MfaEnableResult = { backupCodes };
+        res.json(result);
+      } catch (error) {
+        console.error('MFA enable error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    /**
+     * POST /auth/mfa/disable
+     * MFA'yı kapat (yeniden kimlik doğrulama için parola gerekir)
+     */
+    router.post('/mfa/disable', createAuthMiddleware(jwtService, {
+      errorMessages: config.errorMessages,
+      userRepository: loadUserOnRequest ? userRepository : undefined,
+      authorization: config.authorization,
+    }), async (req: Request, res: Response): Promise<void> => {
+      try {
+        const authUser = (req as AuthenticatedRequest).user;
+        if (!authUser) {
+          res.status(401).json({ error: errorMessages.unauthorized });
+          return;
+        }
+
+        const { password } = req.body;
+        if (!password) {
+          res.status(400).json({ error: 'password is required to disable MFA' });
+          return;
+        }
+
+        const user = await userRepository.findById(authUser.sub);
+        if (!user) {
+          res.status(404).json({ error: 'User not found' });
+          return;
+        }
+
+        const isPasswordValid = await passwordService.verifyPassword(password, user.passwordHash);
+        if (!isPasswordValid) {
+          res.status(401).json({ error: errorMessages.invalidCredentials });
+          return;
+        }
+
+        await updateUser(user.id, {
+          mfaEnabled: false,
+          mfaSecret: undefined,
+          mfaBackupCodeHashes: undefined,
+        });
+        await refreshTokenRepository.revokeAllUserTokens(user.id);
+
+        res.json({ message: 'MFA disabled' });
+      } catch (error) {
+        console.error('MFA disable error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    /**
+     * POST /auth/mfa/verify
+     * MFA challenge'ı bir TOTP kodu veya yedek kodla tamamla, tam token çiftini al
+     */
+    router.post('/mfa/verify', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
+      const ip = getClientIP(req);
+      const userAgent = getUserAgent(req);
+
+      try {
+        const { challengeToken, code } = req.body;
+
+        if (!challengeToken || !code) {
+          res.status(400).json({ error: 'challengeToken and code are required' });
+          return;
+        }
+
+        let payload: { sub: string };
+        try {
+          payload = jwtService.verifyMfaChallengeToken(challengeToken);
+        } catch {
+          res.status(401).json({ error: errorMessages.invalidToken });
+          return;
+        }
+
+        // Per-user limit after challenge is validated (in addition to IP middleware)
+        if (mfaVerifyRateLimiter) {
+          const mfaLimit = mfaVerifyRateLimiter.checkLimit(`mfa:${payload.sub}`);
+          if (!mfaLimit.allowed) {
+            res.setHeader('Retry-After', String(mfaLimit.retryAfter ?? 60));
+            res.status(429).json({
+              error: 'Too many requests',
+              message: 'Too many MFA attempts. Please try again later.',
+              retryAfter: mfaLimit.retryAfter,
+            });
+            return;
+          }
+        }
+
+        const user = await userRepository.findById(payload.sub);
+        if (!user || user.isActive === false || !user.mfaEnabled || !user.mfaSecret) {
+          res.status(401).json({ error: errorMessages.unauthorized });
+          return;
+        }
+
+        const isValidTotp = await mfaService.verifyToken(code, user.mfaSecret);
+
+        if (!isValidTotp) {
+          const backupResult = mfaService.verifyBackupCode(code, user.mfaBackupCodeHashes || []);
+          if (!backupResult.valid || !backupResult.matchedHash) {
+            securityMonitor.recordFailedAttempt(ip, user.email, userAgent);
+            res.status(401).json({ error: 'Invalid MFA code' });
+            return;
+          }
+
+          // Atomik tüketim tercih edilir; yoksa read-modify-write fallback
+          let consumed = false;
+          if (typeof userRepository.consumeMfaBackupCode === 'function') {
+            consumed = await userRepository.consumeMfaBackupCode(user.id, backupResult.matchedHash);
+          } else {
+            const remaining = (user.mfaBackupCodeHashes || []).filter(h => h !== backupResult.matchedHash);
+            await updateUser(user.id, { mfaBackupCodeHashes: remaining });
+            consumed = true;
+          }
+
+          if (!consumed) {
+            securityMonitor.recordFailedAttempt(ip, user.email, userAgent);
+            res.status(401).json({ error: 'Invalid MFA code' });
+            return;
+          }
+        }
+
+        mfaVerifyRateLimiter?.reset(`mfa:${payload.sub}`);
+        securityMonitor.recordSuccessfulLogin(user.id, ip, userAgent);
+
+        const { tokens, csrfToken } = await issueAuthTokens(user, res);
+        const userWithoutPassword = toPublicUser(user);
+
+        const result: LoginResult = {
+          user: userWithoutPassword,
+          tokens,
+          csrfToken,
+        };
+
+        res.json(result);
+      } catch (error) {
+        console.error('MFA verify error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+  }
+
+  // Parola sıfırlama route'ları sadece repository `updateUser` VE
+  // `findByPasswordResetToken`'ı implemente ettiyse eklenir.
+  if (supportsPasswordReset) {
+    const updateUser = userRepository.updateUser!.bind(userRepository);
+    const findByPasswordResetToken = userRepository.findByPasswordResetToken!.bind(userRepository);
+
+    /**
+     * POST /auth/forgot-password
+     * Reset token üret, host uygulamanın onRequest callback'i ile e-posta gönderimini tetikle
+     */
+    router.post('/forgot-password', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
+      try {
+        const { email } = req.body;
+        if (!email) {
+          res.status(400).json({ error: 'email is required' });
+          return;
+        }
+
+        // Güvenlik: kullanıcı var/yok fark etmeksizin her zaman aynı generic yanıt (enumeration önleme)
+        const genericMessage = { message: 'If an account with that email exists, a password reset link has been sent.' };
+
+        const user = await userRepository.findByEmail(email);
+        if (user && user.isActive !== false) {
+          const token = passwordResetService.generateToken();
+          const tokenHash = passwordResetService.hashToken(token);
+          const expiresAt = passwordResetService.getExpiresAt();
+
+          await updateUser(user.id, {
+            passwordResetTokenHash: tokenHash,
+            passwordResetExpiresAt: expiresAt,
+          });
+
+          if (config.passwordReset?.onRequest) {
+            await config.passwordReset.onRequest(toPublicUser(user), token);
+          }
+        }
+
+        res.json(genericMessage);
+      } catch (error) {
+        console.error('Forgot password error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    /**
+     * POST /auth/reset-password
+     * Reset token'ı doğrula, parolayı güncelle, tüm cihazlardan çıkış yaptır
+     */
+    router.post('/reset-password', rateLimitMiddleware, async (req: Request, res: Response): Promise<void> => {
+      try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) {
+          res.status(400).json({ error: 'token and newPassword are required' });
+          return;
+        }
+
+        if (config.passwordRules) {
+          const validation = passwordService.validatePasswordStrength(newPassword, config.passwordRules);
+          if (!validation.valid) {
+            res.status(400).json({ error: 'Password too weak', details: validation.errors });
+            return;
+          }
+        }
+
+        const tokenHash = passwordResetService.hashToken(token);
+        const user = await findByPasswordResetToken(tokenHash);
+
+        if (!user || !user.passwordResetExpiresAt || new Date() > user.passwordResetExpiresAt) {
+          res.status(400).json({ error: 'Invalid or expired reset token' });
+          return;
+        }
+
+        const newPasswordHash = await passwordService.hashPassword(newPassword);
+
+        await updateUser(user.id, {
+          passwordHash: newPasswordHash,
+          passwordResetTokenHash: undefined,
+          passwordResetExpiresAt: undefined,
+        });
+
+        // Güvenlik: parola değiştiğinde tüm cihazlardan çıkış yaptır
+        await refreshTokenRepository.revokeAllUserTokens(user.id);
+
+        res.json({ message: 'Password has been reset successfully' });
+      } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+  }
 
   /**
    * POST /auth/logout
@@ -375,6 +781,7 @@ export function createAuthRouter(config: AuthConfig): Router {
           domain: config.cookie.domain,
           path: config.cookie.path ?? '/auth/refresh',
         });
+        clearCsrfCookie(res);
       }
 
       res.json({ message: 'Logged out successfully' });
@@ -413,6 +820,7 @@ export function createAuthRouter(config: AuthConfig): Router {
           domain: config.cookie.domain,
           path: config.cookie.path ?? '/auth/refresh',
         });
+        clearCsrfCookie(res);
       }
 
       res.json({ message: 'Logged out from all devices' });
@@ -447,8 +855,8 @@ export function createAuthRouter(config: AuthConfig): Router {
         return;
       }
 
-      // Password hash'i hariç tut
-      const userWithoutPassword = omitPasswordHash(userDetails);
+      // Secret alanları hariç tut
+      const userWithoutPassword = toPublicUser(userDetails);
 
       res.json({ user: userWithoutPassword });
     } catch (error) {
@@ -495,6 +903,7 @@ export function createAuthRouter(config: AuthConfig): Router {
   (router as any).securityMonitor = securityMonitor;
   (router as any).tokenCleanupJob = tokenCleanupJob;
   (router as any).rateLimiter = authRateLimiter;
+  (router as any).mfaRateLimiter = mfaVerifyRateLimiter;
 
   return router;
 }

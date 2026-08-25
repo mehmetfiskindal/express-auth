@@ -11,8 +11,31 @@ export interface AuthUser {
   roles?: string[];
   permissions?: Permission[];
   isActive?: boolean;
+  /** Parola sıfırlama token'ının hash'i (SHA-256). Sadece bekleyen bir istek varken dolu. */
+  passwordResetTokenHash?: string;
+  /** Parola sıfırlama token'ının son kullanma zamanı. */
+  passwordResetExpiresAt?: Date;
+  /** MFA (TOTP) etkin mi? */
+  mfaEnabled?: boolean;
+  /** TOTP secret (Base32). mfaEnabled=false iken de "kurulum bekliyor" secret'ı tutabilir. */
+  mfaSecret?: string;
+  /** Kullanılmamış yedek kodların hash'leri (SHA-256, her biri tek kullanımlık). */
+  mfaBackupCodeHashes?: string[];
   [key: string]: unknown; // Ek alanlar için
 }
+
+/**
+ * API yanıtlarında ve host callback'lerinde güvenle dönülebilecek kullanıcı alanları.
+ * Secret / hash / reset token alanları asla buraya dahil edilmez.
+ */
+export type PublicAuthUser = Omit<
+  AuthUser,
+  | 'passwordHash'
+  | 'mfaSecret'
+  | 'mfaBackupCodeHashes'
+  | 'passwordResetTokenHash'
+  | 'passwordResetExpiresAt'
+>;
 
 /**
  * Refresh token kaydı için interface
@@ -56,6 +79,27 @@ export interface UserRepository {
    * Kullanıcı şifresini güncelle (opsiyonel)
    */
   updatePassword?(userId: string, newPasswordHash: string): Promise<void>;
+
+  /**
+   * Kullanıcı kaydını kısmi güncelle (opsiyonel).
+   * Parola sıfırlama ve MFA özellikleri bu metoda dayanır — implemente
+   * edilmezse bu özelliklerin route'ları router'a hiç eklenmez.
+   */
+  updateUser?(userId: string, data: Partial<AuthUser>): Promise<AuthUser | null>;
+
+  /**
+   * Parola sıfırlama token hash'ine göre kullanıcı bul (opsiyonel).
+   * Parola sıfırlama özelliği bu metoda dayanır.
+   */
+  findByPasswordResetToken?(tokenHash: string): Promise<AuthUser | null>;
+
+  /**
+   * MFA yedek kodunu atomik olarak tüket (opsiyonel ama şiddetle önerilir).
+   * `codeHash` listede varsa kaldırıp `true` döner; yoksa `false`.
+   * Race condition'da aynı kodun iki kez kullanılmasını engeller.
+   * Yoksa router read-modify-write fallback kullanır (tek instance'ta zayıf).
+   */
+  consumeMfaBackupCode?(userId: string, codeHash: string): Promise<boolean>;
 }
 
 /**

@@ -186,4 +186,47 @@ export class JWTService {
       return null;
     }
   }
+
+  /**
+   * MFA challenge token üret - şifre doğrulandı ama TOTP henüz doğrulanmadı
+   * durumunda kullanılan kısa ömürlü (5 dakika), tek amaçlı token.
+   */
+  generateMfaChallengeToken(payload: { sub: string }): string {
+    const now = Math.floor(Date.now() / 1000);
+    return jwt.sign(
+      {
+        sub: payload.sub,
+        type: 'mfa_challenge',
+        iat: now,
+        exp: now + 5 * 60,
+      } as JWTPayload,
+      this.jwtSecret,
+      { algorithm: 'HS256' }
+    );
+  }
+
+  /**
+   * MFA challenge token doğrula
+   */
+  verifyMfaChallengeToken(token: string): { sub: string } {
+    try {
+      const decoded = jwt.verify(token, this.jwtSecret, {
+        algorithms: ['HS256'],
+      }) as JWTPayload;
+
+      if (decoded.type !== 'mfa_challenge') {
+        throw new Error('Invalid token type');
+      }
+
+      return { sub: decoded.sub };
+    } catch (error) {
+      if (error instanceof jwt.TokenExpiredError) {
+        throw new Error('Token expired');
+      }
+      if (error instanceof jwt.JsonWebTokenError) {
+        throw new Error('Invalid token');
+      }
+      throw error;
+    }
+  }
 }

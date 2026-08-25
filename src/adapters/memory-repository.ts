@@ -8,6 +8,7 @@ import { AuthUser, RefreshTokenRecord, UserRepository, RefreshTokenRepository } 
 export class MemoryUserRepository implements UserRepository {
   private users: Map<string, AuthUser> = new Map();
   private emailIndex: Map<string, string> = new Map(); // email -> id
+  private resetTokenIndex: Map<string, string> = new Map(); // passwordResetTokenHash -> id
 
   async findByEmail(email: string): Promise<AuthUser | null> {
     const id = this.emailIndex.get(email.toLowerCase());
@@ -39,10 +40,53 @@ export class MemoryUserRepository implements UserRepository {
     return user;
   }
 
+  async updateUser(userId: string, data: Partial<AuthUser>): Promise<AuthUser | null> {
+    const user = this.users.get(userId);
+    if (!user) return null;
+
+    // resetTokenIndex'i güncel tut
+    if ('passwordResetTokenHash' in data) {
+      if (user.passwordResetTokenHash) {
+        this.resetTokenIndex.delete(user.passwordResetTokenHash);
+      }
+      if (data.passwordResetTokenHash) {
+        this.resetTokenIndex.set(data.passwordResetTokenHash, userId);
+      }
+    }
+
+    const updated: AuthUser = { ...user, ...data };
+    this.users.set(userId, updated);
+    return updated;
+  }
+
+  async findByPasswordResetToken(tokenHash: string): Promise<AuthUser | null> {
+    const id = this.resetTokenIndex.get(tokenHash);
+    if (!id) return null;
+    return this.users.get(id) || null;
+  }
+
+  /**
+   * Atomically remove one MFA backup code hash if present.
+   * Synchronous Map mutation — safe against concurrent awaits in a single Node process.
+   */
+  async consumeMfaBackupCode(userId: string, codeHash: string): Promise<boolean> {
+    const user = this.users.get(userId);
+    if (!user?.mfaBackupCodeHashes?.includes(codeHash)) {
+      return false;
+    }
+
+    this.users.set(userId, {
+      ...user,
+      mfaBackupCodeHashes: user.mfaBackupCodeHashes.filter(h => h !== codeHash),
+    });
+    return true;
+  }
+
   // Test yardımcı metodları
   clear(): void {
     this.users.clear();
     this.emailIndex.clear();
+    this.resetTokenIndex.clear();
   }
 
   getAll(): AuthUser[] {

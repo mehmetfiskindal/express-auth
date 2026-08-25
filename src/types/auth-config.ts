@@ -1,5 +1,5 @@
 import { Request } from 'express';
-import { AuthRepositories, AuthUser } from './repository';
+import { AuthRepositories, AuthUser, PublicAuthUser } from './repository';
 import { RateLimitConfig } from '../services/rate-limit-service';
 import { SecurityMonitorConfig } from '../services/security-monitor';
 import { CORSConfig } from '../services/cors-service';
@@ -131,6 +131,21 @@ export interface AuthConfig {
   };
 
   /**
+   * CSRF koruması (double-submit cookie pattern).
+   * Sadece cookie tabanlı akış aktifken (`cookie` tanımlıyken) devreye girer
+   * ve varsayılan olarak AÇIKTIR. Refresh token cookie'den geldiğinde
+   * istekte eşleşen bir CSRF header'ı zorunlu olur.
+   */
+  csrf?: {
+    /** CSRF korumasını etkinleştir (varsayılan: true) */
+    enabled?: boolean;
+    /** CSRF cookie adı (varsayılan: 'csrfToken') */
+    cookieName?: string;
+    /** CSRF header adı (varsayılan: 'x-csrf-token') */
+    headerName?: string;
+  };
+
+  /**
    * Refresh token'ları repository'ye kaydetmeden önce hash'le.
    * Varsayılan: true
    */
@@ -191,6 +206,35 @@ export interface AuthConfig {
    * Token cleanup job yapılandırması
    */
   tokenCleanup?: Partial<CleanupConfig>;
+
+  /**
+   * Parola sıfırlama yapılandırması (opsiyonel).
+   * `repositories.userRepository`'de `updateUser` VE `findByPasswordResetToken`
+   * implemente edilmediyse `/forgot-password` ve `/reset-password` route'ları
+   * router'a hiç eklenmez.
+   */
+  passwordReset?: {
+    /** Reset token'ının geçerlilik süresi (ms). Varsayılan: 1 saat */
+    tokenExpiresIn?: number;
+    /**
+     * Reset e-postasını gönderme sorumluluğu host uygulamada — paket burada
+     * sadece token üretir/doğrular. Bu callback, gerçek token değerini alır;
+     * host uygulama kendi mail servisiyle (SendGrid/SES/nodemailer vb.) gönderir.
+     */
+    onRequest?: (user: PublicAuthUser, token: string) => Promise<void> | void;
+  };
+
+  /**
+   * MFA (TOTP) yapılandırması (opsiyonel).
+   * `repositories.userRepository`'de `updateUser` implemente edilmediyse
+   * `/mfa/*` route'ları router'a hiç eklenmez.
+   */
+  mfa?: {
+    /** otpauth:// URI'sindeki issuer adı (authenticator app'te görünür). Varsayılan: 'ExpressAuth' */
+    issuer?: string;
+    /** Üretilecek yedek kod sayısı. Varsayılan: 10 */
+    backupCodesCount?: number;
+  };
 }
 
 /**
@@ -204,7 +248,7 @@ export interface JWTPayload {
   jti?: string;
   iat: number;
   exp: number;
-  type: 'access' | 'refresh';
+  type: 'access' | 'refresh' | 'mfa_challenge';
 }
 
 /**
@@ -220,8 +264,36 @@ export interface TokenPair {
  * Login sonucu
  */
 export interface LoginResult {
-  user: Omit<AuthUser, 'passwordHash'>;
+  user: PublicAuthUser;
   tokens: TokenPair;
+  /** Cookie tabanlı akışta CSRF koruması aktifse üretilen token */
+  csrfToken?: string;
+}
+
+/**
+ * Kullanıcının MFA'sı aktifse /login bunu döner (tam token yerine)
+ */
+export interface MfaChallengeResult {
+  mfaRequired: true;
+  /** /auth/mfa/verify'a gönderilecek kısa ömürlü challenge token */
+  challengeToken: string;
+}
+
+/**
+ * /auth/mfa/setup sonucu
+ */
+export interface MfaSetupResult {
+  /** Base32 TOTP secret */
+  secret: string;
+  /** Authenticator app'e QR kod olarak gösterilecek otpauth:// URI'si */
+  otpauthUrl: string;
+}
+
+/**
+ * /auth/mfa/enable sonucu — yedek kodlar SADECE bu yanıtta düz metin olarak görünür
+ */
+export interface MfaEnableResult {
+  backupCodes: string[];
 }
 
 /**
@@ -238,4 +310,6 @@ export interface RefreshResult {
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
+  /** Cookie tabanlı akışta CSRF koruması aktifse üretilen yeni token */
+  csrfToken?: string;
 }

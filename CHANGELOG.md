@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-07-30
+
+### Added
+- **Password reset flow**: `POST /auth/forgot-password` and `POST /auth/reset-password`. The package generates/validates single-use, hashed (SHA-256), expiring reset tokens; sending the actual email is left to the host app via a new `passwordReset.onRequest(user, token)` config callback. Resetting a password revokes all of the user's existing refresh tokens. `/forgot-password` always returns the same generic message regardless of whether the email exists (no user enumeration).
+- **MFA (TOTP) support** via [`otplib`](https://www.npmjs.com/package/otplib) (new runtime dependency), Google Authenticator/Authy compatible:
+  - `POST /auth/mfa/setup`, `POST /auth/mfa/enable`, `POST /auth/mfa/disable` (all require an authenticated user).
+  - Two-step login challenge: when a user has MFA enabled, `/auth/login` returns `{ mfaRequired: true, challengeToken }` instead of tokens; `POST /auth/mfa/verify` completes the login with a TOTP code or a single-use backup code.
+  - New short-lived `mfa_challenge` JWT token type (5 minutes), scoped only to `/auth/mfa/verify`.
+  - 10 single-use backup codes generated on enable, stored as SHA-256 hashes only, shown once in the `/mfa/enable` response.
+- New optional `UserRepository` methods: `updateUser(userId, data)` and `findByPasswordResetToken(tokenHash)`. **Both password reset and MFA routes are only registered on the router if the provided repository implements the methods they need** — no error, no crash, the routes simply don't exist if unsupported. `MemoryUserRepository` implements both.
+- New `AuthConfig` fields: `passwordReset` (`tokenExpiresIn`, `onRequest`) and `mfa` (`issuer`, `backupCodesCount`).
+- New exported services: `MFAService`/`createMFAService`, `PasswordResetService`/`createPasswordResetService`.
+- New `AuthUser` fields (all optional, populated automatically by the package): `passwordResetTokenHash`, `passwordResetExpiresAt`, `mfaEnabled`, `mfaSecret`, `mfaBackupCodeHashes`.
+- README "Password Reset" and "Multi-Factor Authentication (MFA)" sections; `docs/database-adapters.md` updated with the new optional interface methods.
+- 3 new end-to-end tests: full MFA setup→enable→challenge→verify flow (incl. backup code single-use), password reset flow with session revocation, and forgot-password enumeration-safety check.
+
+### Fixed
+- **MFA setup bypass**: `POST /auth/mfa/setup` now returns `409` when MFA is already enabled, so a stolen access token cannot disable MFA by starting a new setup.
+- **Sensitive field leakage**: API responses (`/login`, `/me`, `/mfa/verify`, password-reset callbacks) now strip `mfaSecret`, `mfaBackupCodeHashes`, `passwordResetTokenHash`, and `passwordResetExpiresAt` — not only `passwordHash`.
+- **Session revocation on MFA change**: enabling or disabling MFA revokes all of the user's refresh tokens.
+- **Atomic MFA backup codes**: optional `UserRepository.consumeMfaBackupCode`; implemented in `MemoryUserRepository` to prevent single-use codes being redeemed twice under concurrency.
+- **Per-user MFA verify rate limiting**: `/auth/mfa/verify` applies an additional user-scoped limit (same defaults as auth rate limit) and records failed attempts in `SecurityMonitor`.
+
+- Refactored `/login` and `/refresh` to share a single `issueAuthTokens` helper for token generation + cookie/CSRF issuance, removing ~30 lines of duplication and one class of drift risk between the two flows.
+
+This release is purely additive — no existing config, routes, or repository behavior changes for users who don't opt into `passwordReset`/`mfa` or implement the new optional repository methods.
+
+## [2.0.0] - 2026-07-30
+
+### BREAKING CHANGES
+- **CSRF protection is now enabled by default for cookie-based auth flows.** When `cookie` is configured, `/auth/refresh` requests that carry the refresh token via cookie must now include a matching `X-CSRF-Token` header, or they receive `403`.
+  - **Migration**: read the `csrfToken` field returned by `/login` and `/refresh` (also set as a non-httpOnly `csrfToken` cookie) and send it back in the `X-CSRF-Token` header on refresh requests.
+  - **Opt-out**: set `csrf: { enabled: false }` in `AuthConfig` to restore the old behavior.
+  - Clients that send the refresh token in the request body (mobile/API clients) are **not affected**.
+
+### Added
+- New `CSRFService` / `createCSRFService` (double-submit cookie pattern, stateless, constant-time comparison via `crypto.timingSafeEqual`) exported from the package.
+- New `csrf` option in `AuthConfig` (`enabled`, `cookieName`, `headerName`).
+- `/login` and `/refresh` responses now include a `csrfToken` field when cookie flow + CSRF are active; `/logout` and `/logout-all` clear the CSRF cookie.
+- Three new end-to-end CSRF tests (missing token → 403, valid token → 200 + rotation, opt-out → 200).
+- README "CSRF Protection" section with SPA integration example and `cookie-parser` requirement note.
+
 ## [1.1.0] - 2026-07-30
 
 ### Added

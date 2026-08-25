@@ -114,6 +114,14 @@ The `createAuthRouter` creates the following endpoints:
 | POST | `/auth/logout` | Logout (revoke token) | No |
 | POST | `/auth/logout-all` | Logout all devices | Yes |
 | GET | `/auth/me` | Get current user | Yes |
+| POST | `/auth/forgot-password` | Request a password reset token | No* |
+| POST | `/auth/reset-password` | Reset password with a valid token | No* |
+| POST | `/auth/mfa/setup` | Start MFA setup, get a TOTP secret | Yes* |
+| POST | `/auth/mfa/enable` | Confirm setup, get backup codes | Yes* |
+| POST | `/auth/mfa/disable` | Turn MFA off (requires password) | Yes* |
+| POST | `/auth/mfa/verify` | Complete a login MFA challenge | No* |
+
+\* Password reset and MFA routes are only registered if your `UserRepository` implements the optional `updateUser` (and, for password reset, `findByPasswordResetToken`) methods — see [Password Reset](#password-reset) and [Multi-Factor Authentication (MFA)](#multi-factor-authentication-mfa).
 
 ## Configuration
 
@@ -441,6 +449,8 @@ npm run dev
 
 Read the [Database Adapter Guide](./docs/database-adapters.md) for detailed instructions on creating custom adapters.
 
+> **Note:** All four examples enable `cookie: {...}` in their `AuthConfig`, so [CSRF Protection](#csrf-protection) (on by default) applies to their `/auth/refresh` endpoint for cookie-based clients.
+
 ## Examples
 
 ### Express + Prisma + OpenAPI
@@ -513,6 +523,151 @@ const authRouter = createAuthRouter({
 
 This only covers the auth router's own endpoints. `createSecurityMiddleware` (from `@developersailor/express-auth`) can additionally be applied to the rest of your app for general-purpose rate limiting on non-auth routes.
 
+## CSRF Protection
+
+When cookie-based auth is enabled (`cookie` is set in `AuthConfig`), CSRF protection is **on by default** using the stateless double-submit cookie pattern:
+
+1. On successful `/login` and `/refresh`, the server sets a non-httpOnly `csrfToken` cookie and also returns the token in the JSON response (`csrfToken` field).
+2. When the client calls `/auth/refresh` **with the refresh token cookie**, it must echo the token back in the `X-CSRF-Token` header.
+3. The server compares cookie and header with a constant-time check; a missing or mismatched token gets `403`.
+
+The check only applies when the refresh token actually arrives via cookie. Clients that send the refresh token in the request body (mobile apps, server-to-server) are unaffected — they don't use ambient cookie authority, so there is no CSRF vector.
+
+```typescript
+// SPA example
+const login = await fetch('/auth/login', { /* ... */ }).then(r => r.json());
+
+// Later, refresh using the cookie + CSRF header:
+await fetch('/auth/refresh', {
+  method: 'POST',
+  credentials: 'include',
+  headers: { 'X-CSRF-Token': login.csrfToken }, // or read the csrfToken cookie
+});
+```
+
+Configuration:
+
+```typescript
+const authRouter = createAuthRouter({
+  // ...
+  cookie: {},                    // cookie flow enables CSRF automatically
+  csrf: {
+    // enabled: false,           // opt out (not recommended for browser clients)
+    // cookieName: 'csrfToken',  // default
+    // headerName: 'x-csrf-token', // default; add custom names to CORS allowedHeaders
+  },
+});
+```
+
+Notes:
+
+- Cookie flows require [`cookie-parser`](https://www.npmjs.com/package/cookie-parser) in your app (`app.use(cookieParser())`); the router reads `req.cookies`.
+- The default `X-CSRF-Token` header is already in the CORS defaults' `allowedHeaders`. If you set a custom `headerName`, add it to your CORS config.
+- `/logout` and `/logout-all` are protected by the `Authorization` Bearer header, which cross-site attackers cannot forge, so they don't need the CSRF check.
+
+## Password Reset
+
+`/auth/forgot-password` and `/auth/reset-password` are only registered if your `UserRepository` implements the optional `updateUser` **and** `findByPasswordResetToken` methods (the built-in `MemoryUserRepository` implements both). The package generates and validates reset tokens; **sending the actual email is your responsibility**, via the `passwordReset.onRequest` callback:
+
+```typescript
+const authRouter = createAuthRouter({
+  // ...
+  passwordReset: {
+    tokenExpiresIn: 60 * 60 * 1000, // 1 hour (default)
+    onRequest: async (user, token) => {
+      // Send this token via your own mail service (SendGrid, SES, nodemailer, ...)
+      const resetLink = `https://yourapp.com/reset-password?token=${token}`;
+      await sendEmail(user.email, 'Reset your password', resetLink);
+    },
+  },
+});
+```
+
+Flow:
+
+```bash
+# 1. Request a reset (always returns a generic message — doesn't reveal whether the email exists)
+curl -X POST http://localhost:3000/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'
+
+# 2. User clicks the emailed link, submits the token + new password
+curl -X POST http://localhost:3000/auth/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{"token": "TOKEN_FROM_EMAIL", "newPassword": "NewSecurePass123!"}'
+```
+
+Notes:
+
+- The response to `/forgot-password` is identical whether or not the email exists, to prevent user enumeration.
+- Reset tokens are single-use, expire after `tokenExpiresIn` (default 1 hour), and are stored hashed (SHA-256) — never in plain text.
+- On successful reset, **all of the user's existing refresh tokens are revoked** (`revokeAllUserTokens`), forcing re-login on every device.
+- Applies your configured `passwordRules` (if any) to the new password, same as `/register`.
+
+## Multi-Factor Authentication (MFA)
+
+`/auth/mfa/*` routes are only registered if your `UserRepository` implements the optional `updateUser` method. MFA uses TOTP (Time-based One-Time Password, Google Authenticator / Authy compatible) via [`otplib`](https://www.npmjs.com/package/otplib), plus one-time backup codes.
+
+```typescript
+const authRouter = createAuthRouter({
+  // ...
+  mfa: {
+    issuer: 'MyApp',       // shown in the authenticator app; default 'ExpressAuth'
+    backupCodesCount: 10,  // default 10
+  },
+});
+```
+
+Setup flow (user must already be logged in):
+
+```bash
+# 1. Start setup — returns a secret + otpauth:// URI (render this as a QR code)
+curl -X POST http://localhost:3000/auth/mfa/setup \
+  -H "Authorization: Bearer ACCESS_TOKEN"
+# => { "secret": "JBSWY3DPEHPK3PXP", "otpauthUrl": "otpauth://totp/MyApp:user@example.com?..." }
+
+# 2. Confirm with a code from the authenticator app to actually enable MFA
+curl -X POST http://localhost:3000/auth/mfa/enable \
+  -H "Authorization: Bearer ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "123456"}'
+# => { "backupCodes": ["a1b2c-3d4e5", ...] }  -- shown ONCE, store them safely
+```
+
+Login flow once MFA is enabled:
+
+```bash
+# 1. Normal login returns a challenge instead of tokens
+curl -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "..."}'
+# => { "mfaRequired": true, "challengeToken": "..." }
+
+# 2. Complete the challenge with a TOTP code (or a backup code)
+curl -X POST http://localhost:3000/auth/mfa/verify \
+  -H "Content-Type: application/json" \
+  -d '{"challengeToken": "...", "code": "123456"}'
+# => { "user": {...}, "tokens": {...} }
+```
+
+To turn MFA off:
+
+```bash
+curl -X POST http://localhost:3000/auth/mfa/disable \
+  -H "Authorization: Bearer ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "current-password"}'
+```
+
+Notes:
+
+- The challenge token is short-lived (5 minutes) and only usable at `/auth/mfa/verify` — it cannot be used to access any other endpoint.
+- Backup codes are single-use; each one is removed after it's consumed. Only the SHA-256 hash is stored. Prefer implementing `UserRepository.consumeMfaBackupCode` for atomic consumption under concurrency.
+- `/mfa/setup` returns `409` if MFA is already enabled — disable first (password required). This prevents a stolen access token from turning MFA off via re-setup.
+- Enabling or disabling MFA revokes all of the user's refresh tokens.
+- `/mfa/verify` is rate-limited by IP (same as `/login`) **and** per user (same defaults: 5 / 15 min), limiting brute-force against stolen challenge tokens.
+- User objects in API responses never include `mfaSecret`, backup-code hashes, or password-reset fields.
+
 ## Security Checklist
 
 Before going to production:
@@ -520,12 +675,15 @@ Before going to production:
 - [x] Use strong JWT secrets (min 32 chars, random)
 - [x] Enable HTTPS (secure cookies)
 - [x] Rate limiting on auth endpoints (on by default, see [Rate Limiting](#rate-limiting))
+- [x] CSRF protection for cookie flows (on by default, see [CSRF Protection](#csrf-protection))
 - [x] Configure CORS properly
 - [x] Use environment variables for secrets
 - [x] Enable password validation rules
 - [x] Review token expiration times
 - [x] Set up refresh token cleanup
 - [x] Monitor for suspicious activity
+- [ ] Consider enabling MFA (see [Multi-Factor Authentication](#multi-factor-authentication-mfa)) — off by default, requires `UserRepository.updateUser`
+- [ ] Consider enabling password reset (see [Password Reset](#password-reset)) — requires `UserRepository.updateUser` + `findByPasswordResetToken`, and you must supply an email-sending `onRequest` callback
 
 ## Type Exports
 

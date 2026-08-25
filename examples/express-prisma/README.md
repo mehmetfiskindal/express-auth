@@ -80,6 +80,8 @@ curl -X POST http://localhost:3000/auth/refresh \
   -d '{"refreshToken": "YOUR_REFRESH_TOKEN"}'
 ```
 
+> **Not:** Bu `cookie: {...}` config'i kullandığı için (`src/index.ts`), tarayıcı tabanlı bir istemci refresh token'ı cookie üzerinden gönderirse (yukarıdaki gibi body'de değil), `@developersailor/express-auth@2.0.0`'dan itibaren varsayılan olarak açık olan CSRF koruması devreye girer ve `X-CSRF-Token` header'ı gerektirir. Detaylar için ana paketin [CSRF Protection](../../README.md#csrf-protection) bölümüne bakın.
+
 ### Logout
 ```bash
 curl -X POST http://localhost:3000/auth/logout \

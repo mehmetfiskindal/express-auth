@@ -33,6 +33,14 @@ interface UserRepository {
     roles?: string[];
   }): Promise<AuthUser>;
   updatePassword?(userId: string, newPasswordHash: string): Promise<void>;
+
+  // Optional — required only if you want password reset and/or MFA support.
+  // If either is missing, the corresponding routes are simply not registered
+  // on the router (no error, no crash).
+  updateUser?(userId: string, data: Partial<AuthUser>): Promise<AuthUser | null>;
+  findByPasswordResetToken?(tokenHash: string): Promise<AuthUser | null>;
+  /** Atomically consume one MFA backup code hash (recommended for MFA). */
+  consumeMfaBackupCode?(userId: string, codeHash: string): Promise<boolean>;
 }
 ```
 
@@ -45,9 +53,17 @@ interface AuthUser {
   passwordHash: string;
   roles?: string[];
   isActive?: boolean;
+  // Populated automatically by the package when password reset / MFA are used
+  passwordResetTokenHash?: string;
+  passwordResetExpiresAt?: Date;
+  mfaEnabled?: boolean;
+  mfaSecret?: string;
+  mfaBackupCodeHashes?: string[];
   [key: string]: unknown; // Allow additional fields
 }
 ```
+
+> See [Password Reset](../README.md#password-reset) and [Multi-Factor Authentication (MFA)](../README.md#multi-factor-authentication-mfa) in the main README for the full request/response flow. The `examples/express-prisma` and `examples/express-mongodb` adapters in this repo do not yet implement `updateUser`/`findByPasswordResetToken` — add them the same way `updatePassword` is implemented there if you want these features in those examples.
 
 ### RefreshTokenRepository
 
